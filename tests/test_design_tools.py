@@ -321,7 +321,7 @@ class DesignServerTests(unittest.TestCase):
 
     def test_registered_design_schemas(self):
         tools = {t.name:t for t in asyncio.run(server.mcp.list_tools())}
-        self.assertEqual(len(tools), 42)
+        self.assertEqual(len(tools), 67)
         self.assertTrue(tools['apply_garment_recipe'].inputSchema['properties']['dry_run']['default'])
         self.assertEqual(tools['assign_fabric'].inputSchema['properties']['assignment_mode']['default'], 1)
 

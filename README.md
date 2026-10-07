@@ -107,50 +107,90 @@ tools to work.
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `ping` | Check the listener is reachable. |
-| `execute_python(code)` | Run arbitrary Python in MD's interpreter. `import` the `*_api` modules; bind your return value to a name called `result`. Returns `{stdout, stderr, result, error}`. |
-| `shutdown_listener()` | Stop the listener loop and release the MD GUI. |
-| `scene_info()` | Project name/path, MD version, pattern & fabric counts. |
-| `list_patterns()` | Pattern pieces: index, name, assigned fabric index. |
-| `list_fabrics()` | Fabrics: index, name (+ fabric-style list). |
-| `assign_fabric(fabric_index, pattern_index, assignment_mode=1)` | Assign fabric to the current colorway (1), all unlinked (2), or all linked (3). |
-| `import_project(path)` | Open a `.zprj` / `.zpac` / `.obj` / `.fbx` / ... by absolute path (`import_api.ImportFile`). |
-| `export_project(path)` | Save the scene as a `.zprj` (`export_api.ExportZPrjW`). |
-| `simulate(steps=1)` | `utility_api.Simulate(int)`. |
-| `md_api(module, contains="")` | List public module attributes; substring-filtered. Inspect a callable's `__doc__` before using it. |
-| `preview_garment(output_dir, ...)` | Return turntable PNG images directly as MCP image content. |
-| `export_turntable_images(path, ...)` | Write evenly spaced garment previews with verified output files. |
-| `export_custom_views(output_dir, ...)` | Export existing saved custom views without the standard snapshot dialog. |
-| `export_obj(path, ...)` | Export garment OBJ with explicit scale, mesh, avatar and UV options. |
-| `inspect_pattern(pattern_index)` | Inspect boundary edges, points, fabric and mesh resolution. |
-| `rename_pattern(pattern_index, name)` | Rename a piece and verify its name. |
-| `mirror_pattern(pattern_index, with_sewing=False)` | Create a symmetric piece and return refreshed indices. |
-| `select_patterns(pattern_indices, ...)` | Select multiple pieces and verify selection. |
-| `set_pattern_resolution(pattern_indices, particle_distance, mesh_type)` | Batch-edit particle distance and Triangle/Quad mesh type with read-back checks. |
-| `list_seams()` | List sewing groups. |
-| `sew_edges(pattern_a, line_a, pattern_b, line_b, ...)` | Sew validated boundary edges with explicit directions. |
-| `assign_fabric_batch(fabric_index, pattern_indices, assignment_mode=1)` | Batch-assign a fabric and report partial failures. |
-| `create_fabric_from_textures(path, base_texture, ...)` | Create a .zfab preset from existing texture maps. |
-| `save_checkpoint(path, ...)` | Save and verify a .zprj checkpoint. |
-| `garment_workflow(output_dir, ...)` | Checkpoint, optionally append avatar/garment assets, simulate, save, export mesh and previews. |
-| `create_pattern(points, name, ...)`, `create_rectangle(width, height, name, ...)` | Create validated straight-edge pattern geometry. |
-| `diagnose_sewing(seam_pairs, ...)` | Compare explicit boundary pairs and return mismatches, reused edges and a sewing map. |
-| `import_fabric(path)`, `replace_fabric(fabric_index, path)` | Import .zfab/.jfab or replace an existing fabric using .zfab. |
-| `build_skirt_recipe(...)` | Generate a two-panel skirt block from measurements without changing MD. |
-| `save_garment_recipe(path, recipe)`, `load_garment_recipe(path)` | Persist and validate data-only JSON recipes. |
-| `apply_garment_recipe(recipe, ..., dry_run=True)` | Review a recipe or checkpoint, append pieces, sew, apply fabric and export. |
-| `animation_state()`, `configure_animation(start_frame, end_frame)` | Read/set animation ranges with read-back checks. |
-| `record_animation(start_frame, end_frame, checkpoint_path)` | Checkpoint then record cloth animation. |
-| `export_alembic(path, ...)` | Export an existing garment animation cache to Alembic. |
-| `save_export_profile(...)`, `export_obj_with_profile(path, profile_path)` | Save explicit destination calibration and reuse validated scale/axes. |
-| `batch_garment_workflows(jobs, output_dir)` | Replace the scene per .zprj job, checkpoint and export, then write a batch report. |
+<!-- TOOLS:START -->
+
+**Total: 67 MCP tools (v0.5.0).**
+
+Every registered tool is listed individually below. Required inputs are shown;
+the MCP schema supplies optional settings and defaults.
+
+| Tool | Required inputs | What it does |
+|---|---|---|
+| `animation_state` | — | Read the current animation frame and start/end range. |
+| `apply_fit_adjustments` | `registry_path`, `adjustments`, `checkpoint_path` | Checkpoint and apply explicit bounded move_2d, layer or resolution corrections to named pieces. |
+| `apply_garment_recipe` | `recipe` | Review or apply an explicit garment recipe. Dry-run is the default. |
+| `arrange_patterns` | `pattern_indices`, `arrangement_index` | Assign patterns to an installed avatar arrangement point and read the resulting properties. |
+| `assign_fabric` | `fabric_index`, `pattern_index` | Assign fabric with colorway mode 1=current, 2=all unlinked, 3=all linked. |
+| `assign_fabric_batch` | `fabric_index`, `pattern_indices` | Assign one fabric to multiple pieces with preflight bounds checks. |
+| `batch_garment_workflows` | `jobs`, `output_dir` | Process 1–50 .zprj projects independently with checkpoints and a JSON report. |
+| `bind_pattern_reference` | `registry_path`, `ref_id`, `pattern_index`, `edge_names` | Persist a piece reference and named boundary edges using name plus geometry signature. |
+| `build_skirt_recipe` | `waist_cm`, `length_cm`, `hem_cm` | Build a data-only two-panel skirt block with matching side seams. |
+| `capture_fit_report` | `output_dir`, `pattern_indices` | Return garment images, edge target comparisons, seam diagnostics and a saved fit report. |
+| `clone_pattern_layer` | `pattern_index`, `name` | Create an over/under layer clone for lining and verify the added piece. |
+| `configure_animation` | `start_frame`, `end_frame` | Set an animation frame range with read-back checks. Does not simulate. |
+| `copy_pattern` | `pattern_index`, `name` | Copy a pattern with a 2D offset and verify the added piece's index/name. |
+| `create_curved_pattern` | `vertices`, `name` | Create a named native pattern with [x,y,type] vertices: 0 straight, 2 spline, 3 Bezier. |
+| `create_fabric_from_textures` | `path`, `base_texture` | Create a .zfab preset from existing texture maps, verifying the output file. |
+| `create_internal_shape` | `pattern_index`, `vertices` | Create an internal line or closed construction shape using [x,y,type] vertices. |
+| `create_pattern` | `points`, `name` | Create a named straight-edge polygon from [x,y] points in MD native units. |
+| `create_rectangle` | `width`, `height`, `name` | Create a rectangle in MD native units; boundary starts at the origin. |
+| `create_scene_checkpoint` | `path` | Save a fresh .zprj plus .checkpoint.json manifest with SHA-256 and pattern count/names. |
+| `diagnose_sewing` | `seam_pairs` | Compare explicit boundary pairs, report length mismatches/reused edges and a sewing map. |
+| `execute_python` | `code` | Execute arbitrary Python inside Marvelous Designer's interpreter. |
+| `export_alembic` | `path` | Export garment animation to a fresh Alembic file using explicit options. |
+| `export_custom_views` | `output_dir` | Export saved MD custom views into an absolute output directory. |
+| `export_obj` | `path` | Export garment OBJ with explicit options to avoid an export dialog. |
+| `export_obj_with_profile` | `path`, `profile_path` | Export OBJ using a saved, destination-validated profile and explicit options. |
+| `export_pattern_json` | `path` | Export verified MD-native geometry JSON for external editing and round-trip import. |
+| `export_project` | `path` | Save the current scene as a .zprj project file at the given absolute path. |
+| `export_turntable_images` | `path` | Export 1–72 evenly spaced turntable images using an absolute PNG path prefix. |
+| `garment_workflow` | `output_dir` | Checkpoint, optionally append .avt/.zpac assets, simulate, save, export OBJ and previews. |
+| `get_operation_history` | — | Read recent registered MD operation statuses/IDs/digests for this server process (up to 100). |
+| `get_pattern_layer` | `pattern_index` | Read a pattern's simulation layer. |
+| `import_fabric` | `path` | Import an existing absolute .zfab/.jfab path; verify its index and name. |
+| `import_pattern_json` | `path`, `checkpoint_path` | Checkpoint then import edited MD-native pattern JSON; refresh indices and references. |
+| `import_project` | `path` | Open an MD project / garment / mesh file (.zprj, .zpac, .obj, .fbx, ...) by absolute path. |
+| `inspect_arrangement` | `pattern_index` | Read a pattern's native avatar arrangement properties. |
+| `inspect_pattern` | `pattern_index` | Inspect a pattern's name, fabric, mesh resolution, points and boundary edges. |
+| `list_arrangements` | — | List installed avatar arrangement points with their native properties. |
+| `list_fabrics` | — | List fabrics in the current scene: index and name (plus the fabric-style name list). |
+| `list_patterns` | — | List pattern pieces in the current scene: index, name, assigned fabric index. |
+| `list_seams` | — | List the sewing groups in the current scene by index and name. |
+| `load_garment_recipe` | `path` | Load and validate a data-only recipe JSON, with no scene changes. |
+| `md_api` | `module` | List public attributes of an installed MD API module, optionally filtered by name. |
+| `measure_patterns` | `pattern_indices` | Measure 2D boundary lengths and compare explicit edge targets/tolerances in native units. |
+| `mirror_pattern` | `pattern_index` | Create a symmetric pattern, optionally including sewing. |
+| `move_pattern_2d` | `pattern_index`, `x`, `y` | Move a piece in the 2D editor and verify its position; uses native units. |
+| `ping` | — | Verify the MD listener is reachable. Returns whatever the listener echoes back. |
+| `preview_garment` | `output_dir` | Generate up to 8 turntable views and return PNG image content to the agent. |
+| `record_animation` | `start_frame`, `end_frame`, `checkpoint_path` | Checkpoint then run MD animation recording for an explicit frame range. |
+| `rename_pattern` | `pattern_index`, `name` | Rename a pattern piece and read its name back to verify the change. |
+| `replace_fabric` | `fabric_index`, `path` | Replace an existing fabric using a .zfab file. Verify appearance separately. |
+| `resolve_pattern_reference` | `registry_path`, `ref_id` | Resolve a saved piece/edge reference to current indices, rejecting stale or ambiguous matches. |
+| `restore_checkpoint` | `manifest_path`, `preserve_current_path` | Verify a checkpoint hash, preserve the current scene, load and verify count/names. |
+| `run_fitting_pass` | `output_dir`, `pattern_indices` | Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report. |
+| `save_checkpoint` | `path` | Save a .zprj checkpoint without a thumbnail dialog and verify the file. |
+| `save_export_profile` | `path`, `destination`, `scale`, `axis_codes`, `invert_axes`, `calibration_note` | Save explicit destination scale/axes. No destination defaults are guessed. |
+| `save_garment_recipe` | `path`, `recipe` | Validate and save a reusable JSON recipe; refuses overwrite by default. |
+| `save_operation_history` | `path` | Persist the current process's operation journal to JSON; contains digests, not replayable code. |
+| `scene_info` | — | Summary of the current MD scene: project name/path, MD version, pattern & fabric counts. |
+| `select_patterns` | `pattern_indices` | Select multiple pattern pieces and return the verified selection. |
+| `set_pattern_constraints` | `pattern_indices` | Set freeze, strengthen or solidify; only solidify has documented state read-back. |
+| `set_pattern_layers` | `pattern_indices`, `layer` | Set simulation layers from 0 through 20 with read-back checks and partial progress. |
+| `set_pattern_resolution` | `pattern_indices`, `particle_distance` | Set particle distance and mesh type for a batch of patterns, then read back. |
+| `sew_edges` | `pattern_a`, `line_a`, `pattern_b`, `line_b` | Sew two boundary edges. True means forward and False means backward. |
+| `sew_internal_edges` | `pattern_a`, `line_a`, `pattern_b`, `line_b` | Sew boundary/internal or internal/internal edges using explicit child indices. |
+| `sew_named_edges` | `registry_path`, `ref_a`, `edge_a`, `ref_b`, `edge_b`, `checkpoint_path` | Resolve named edges together, checkpoint and sew validated endpoints. |
+| `shutdown_listener` | — | Stop the MD-side listener's blocking loop and release the Marvelous Designer GUI. |
+| `simulate` | — | Run cloth simulation via utility_api.Simulate(int). |
+
+<!-- TOOLS:END -->
 
 Anything not covered by a wrapper: use `execute_python` directly.
 
-Version 0.4 exposes 42 tools. See [garment/export contracts](docs/features.md) and
-[recipe, animation and batch examples](docs/recipes.md) for checkpoint guidance
+Version 0.5 exposes 67 tools. See [garment/export contracts](docs/features.md) and
+[recipe, animation and batch examples](docs/recipes.md), and
+[complex garment controls](docs/complex-design.md) for checkpoint guidance
 and validation limits. Restart the MCP client
 connection after updating so Codex, Hermes or another client discovers the tools.
 
@@ -165,12 +205,17 @@ Run the protocol tests from the repository root with:
 ```powershell
 $env:PYTHONPATH = "src;md_addon"
 uv run python -m unittest discover -s tests -v
+uv run python scripts/update_tool_catalog.py --check
 ```
 
 These tests exercise TCP framing, API contracts, mutation preflight, partial
 failures, workflow ordering and actual MCP image content without requiring a
 Marvelous Designer installation. `uv sync` installs the SDK and Pillow needed
 for the integration tests. Plain Python without the SDK skips those tests.
+The tool catalog is generated from FastMCP schemas; after adding tools, run
+`uv run python scripts/update_tool_catalog.py` to update every row and the total.
+New v0.5 controls have contract tests; live MD validation remains pending because
+the listener was offline. See [complex garment controls](docs/complex-design.md).
 
 ## Why does MD freeze while the listener runs?
 

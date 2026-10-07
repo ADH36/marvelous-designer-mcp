@@ -1,5 +1,13 @@
 import base64
 import json
+import hashlib
+import time
+import uuid
+import os
+import tempfile
+from collections import deque
+from datetime import datetime, timezone
+from threading import Lock
 from pathlib import Path
 from typing import Literal
 
@@ -7,12 +15,15 @@ from PIL import Image, ImageOps
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from . import bridge, operations, recipes
+from . import bridge, operations, recipes, advanced
 from .config import MD_HOST, MD_PORT
 
 mcp = FastMCP("marvelous-designer")
 _OPERATION_SOURCE = Path(operations.__file__).read_text(encoding="utf-8")
 _RECIPE_SOURCE = Path(recipes.__file__).read_text(encoding="utf-8")
+_ADVANCED_SOURCE = Path(advanced.__file__).read_text(encoding="utf-8")
+_history = deque(maxlen=100)
+_history_lock = Lock()
 
 
 def _md_exec(code: str, *, timeout: float | None = None) -> dict:
@@ -35,12 +46,12 @@ def _md_exec(code: str, *, timeout: float | None = None) -> dict:
     return out
 
 
-def _md_operation(operation: str, *, timeout: float | None = None, **params) -> dict:
+def _execute_md_operation(operation: str, *, timeout: float | None = None, **params) -> dict:
     try:
         encoded = json.dumps(params, allow_nan=False, ensure_ascii=True)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}
-    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
+    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + '\n' + _ADVANCED_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
     response = _md_exec(code, timeout=timeout)
     if response.get("ok") and isinstance(response.get("result"), dict):
         outcome = response["result"]
@@ -49,6 +60,33 @@ def _md_operation(operation: str, *, timeout: float | None = None, **params) -> 
                 outcome[stream] = response[stream]
         return outcome
     return response
+
+
+def _md_operation(operation: str, *, timeout: float | None = None, **params) -> dict:
+    # Record identifiers and a digest, never arbitrary scripts or complete inputs.
+    entry = {'operation_id': uuid.uuid4().hex, 'operation': operation,
+             'started_at': datetime.now(timezone.utc).isoformat(), 'status': 'started',
+             'parameter_keys': sorted(params)}
+    try:
+        entry['parameter_sha256'] = hashlib.sha256(json.dumps(params, sort_keys=True, allow_nan=False).encode()).hexdigest()
+    except (ValueError, TypeError):
+        pass
+    with _history_lock:
+        _history.append(entry)
+    started = time.monotonic()
+    try:
+        outcome = _execute_md_operation(operation, timeout=timeout, **params)
+    except Exception:
+        with _history_lock:
+            entry.update(status='uncertain', elapsed_seconds=round(time.monotonic()-started, 3))
+        raise
+    with _history_lock:
+        entry.update(status='completed' if outcome.get('ok') else
+                     ('uncertain' if str(outcome.get('error', '')).startswith('bridge:') else 'failed'),
+                     elapsed_seconds=round(time.monotonic()-started, 3),
+                     partial_change_possible=outcome.get('partial_change_possible', False))
+    outcome['operation_id'] = entry['operation_id']
+    return outcome
 
 
 def _resize_turntable(outcome: dict, width: int, height: int) -> dict:
@@ -240,8 +278,10 @@ def simulate(steps: int = 1) -> dict:
 
 @mcp.tool()
 def md_api(module: str, contains: str = "") -> dict:
-    """List the functions of an MD API module (import_api, export_api, fabric_api, pattern_api,
-    utility_api, ...). `contains` filters names by case-insensitive substring.
+    """List public attributes of an installed MD API module, optionally filtered by name.
+
+    Modules include import_api, export_api, fabric_api, pattern_api and utility_api.
+    `contains` filters names by case-insensitive substring.
 
     To learn a function's signature, inspect its __doc__ via execute_python first.
     Wrong/no-argument probing can invoke valid overloads, so don't probe setters.
@@ -492,8 +532,21 @@ def _write_json(path: str, value: dict, overwrite: bool = False) -> dict:
     if len(encoded.encode('utf-8')) > 1024 * 1024:
         raise ValueError('JSON document exceeds 1 MiB')
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w' if overwrite else 'x', encoding='utf-8') as file:
-        file.write(encoded)
+    if overwrite:
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=Path(path).parent, delete=False) as file:
+                temporary = file.name
+                file.write(encoded)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, path)
+        finally:
+            if temporary and os.path.exists(temporary):
+                os.unlink(temporary)
+    else:
+        with open(path, 'x', encoding='utf-8') as file:
+            file.write(encoded)
     return {'ok': True, 'path': path, 'bytes': Path(path).stat().st_size}
 
 
@@ -733,3 +786,332 @@ def batch_garment_workflows(jobs: list[dict], output_dir: str, timeout: float = 
             _attach_report(outcome, str(Path(output_dir) / 'batch-result.json'))
         return outcome
     return _local_call(batch)
+
+
+@mcp.tool()
+def create_curved_pattern(vertices: list[list[float | int]], name: str) -> dict:
+    """Create a named native pattern with [x,y,type] vertices: 0 straight, 2 spline, 3 Bezier.
+
+    Validates the vertex polygon, not the full curve or Bezier handles. Inspect the
+    resulting curves visually; coordinates use MD native units.
+    """
+    return _md_operation('create_curved_pattern', vertices=vertices, name=name)
+
+
+@mcp.tool()
+def create_internal_shape(pattern_index: int, vertices: list[list[float | int]], closed: bool = False) -> dict:
+    """Create an internal line or closed construction shape using [x,y,type] vertices."""
+    return _md_operation('create_internal_shape', pattern_index=pattern_index, vertices=vertices, closed=closed)
+
+
+@mcp.tool()
+def sew_internal_edges(pattern_a: int, line_a: int, pattern_b: int, line_b: int,
+                       child_a: int | None = None, child_b: int | None = None,
+                       direction_a: bool = True, direction_b: bool = False) -> dict:
+    """Sew boundary/internal or internal/internal edges using explicit child indices."""
+    return _md_operation('sew_internal_edges', pattern_a=pattern_a, line_a=line_a,
+                         pattern_b=pattern_b, line_b=line_b, child_a=child_a, child_b=child_b,
+                         direction_a=direction_a, direction_b=direction_b)
+
+
+@mcp.tool()
+def move_pattern_2d(pattern_index: int, x: float, y: float) -> dict:
+    """Move a piece in the 2D editor and verify its position; uses native units."""
+    return _md_operation('move_pattern_2d', pattern_index=pattern_index, x=x, y=y)
+
+
+@mcp.tool()
+def copy_pattern(pattern_index: int, name: str, offset_x: float = 100.0, offset_y: float = 0.0) -> dict:
+    """Copy a pattern with a 2D offset and verify the added piece's index/name."""
+    return _md_operation('copy_pattern', pattern_index=pattern_index, name=name, offset_x=offset_x, offset_y=offset_y)
+
+
+@mcp.tool()
+def export_pattern_json(path: str, overwrite: bool = False) -> dict:
+    """Export verified MD-native geometry JSON for external editing and round-trip import."""
+    return _md_operation('export_pattern_json', path=path, overwrite=overwrite)
+
+
+@mcp.tool()
+def import_pattern_json(path: str, checkpoint_path: str) -> dict:
+    """Checkpoint then import edited MD-native pattern JSON; refresh indices and references."""
+    return _md_operation('import_pattern_json', path=path, checkpoint_path=checkpoint_path)
+
+
+@mcp.tool()
+def list_arrangements() -> dict:
+    """List installed avatar arrangement points with their native properties."""
+    return _md_operation('list_arrangements')
+
+
+@mcp.tool()
+def inspect_arrangement(pattern_index: int) -> dict:
+    """Read a pattern's native avatar arrangement properties."""
+    return _md_operation('inspect_arrangement', pattern_index=pattern_index)
+
+
+@mcp.tool()
+def arrange_patterns(pattern_indices: list[int], arrangement_index: int,
+                     shape_style: Literal['Flat', 'Curved'] = 'Flat',
+                     orientation: int | None = None, position: list[int] | None = None) -> dict:
+    """Assign patterns to an installed avatar arrangement point and read the resulting properties.
+
+    Discover indices first. orientation and [x,y,offset] position are explicit native
+    API values; their interpretation needs installed-version confirmation. Inspect
+    placement visually before simulation.
+    """
+    return _md_operation('arrange_patterns', pattern_indices=pattern_indices, arrangement_index=arrangement_index,
+                         shape_style=shape_style, orientation=orientation, position=position)
+
+
+@mcp.tool()
+def get_pattern_layer(pattern_index: int) -> dict:
+    """Read a pattern's simulation layer."""
+    return _md_operation('get_pattern_layer', pattern_index=pattern_index)
+
+
+@mcp.tool()
+def set_pattern_layers(pattern_indices: list[int], layer: int) -> dict:
+    """Set simulation layers from 0 through 20 with read-back checks and partial progress."""
+    return _md_operation('set_pattern_layers', pattern_indices=pattern_indices, layer=layer)
+
+
+@mcp.tool()
+def set_pattern_constraints(pattern_indices: list[int], freeze: bool | None = None,
+                            strengthen: bool | None = None, solidify: bool | None = None) -> dict:
+    """Set freeze, strengthen or solidify; only solidify has documented state read-back."""
+    return _md_operation('set_pattern_constraints', pattern_indices=pattern_indices,
+                         freeze=freeze, strengthen=strengthen, solidify=solidify)
+
+
+@mcp.tool()
+def clone_pattern_layer(pattern_index: int, name: str, under: bool = True,
+                        offset_x: float = 100.0, offset_y: float = 0.0) -> dict:
+    """Create an over/under layer clone for lining and verify the added piece."""
+    return _md_operation('clone_pattern_layer', pattern_index=pattern_index, name=name, under=under,
+                         offset_x=offset_x, offset_y=offset_y)
+
+
+def _registry(path, allow_new=False):
+    filename = Path(operations._path(path, '.json'))
+    registry = {'schema_version': 1, 'references': {}} if allow_new and not filename.exists() else _read_json(path)
+    recipes.recipe_keys(registry, ('schema_version','references'), ('schema_version','references'), 'reference registry')
+    if type(registry['schema_version']) is not int or registry['schema_version'] != 1 or not isinstance(registry['references'], dict):
+        raise ValueError('Invalid reference registry')
+    for key, reference in registry['references'].items():
+        if not isinstance(reference, dict) or reference.get('ref_id') != key:
+            raise ValueError('Registry ID does not match its reference')
+    return registry
+
+
+@mcp.tool()
+def bind_pattern_reference(registry_path: str, ref_id: str, pattern_index: int, edge_names: dict[str, int]) -> dict:
+    """Persist a piece reference and named boundary edges using name plus geometry signature.
+
+    Rebinding is explicit. References reject missing, changed or ambiguous geometry;
+    they are file-backed checks, not native MD UUIDs.
+    """
+    def bind():
+        registry = _registry(registry_path, allow_new=True)
+        outcome = _md_operation('bind_pattern_reference', ref_id=ref_id, pattern_index=pattern_index, edge_names=edge_names)
+        if outcome.get('ok'):
+            registry['references'][ref_id] = outcome['reference']
+            outcome['registry'] = _write_json(registry_path, registry, overwrite=True)
+        return outcome
+    return _local_call(bind)
+
+
+@mcp.tool()
+def resolve_pattern_reference(registry_path: str, ref_id: str) -> dict:
+    """Resolve a saved piece/edge reference to current indices, rejecting stale or ambiguous matches."""
+    return _local_call(lambda: _md_operation('resolve_pattern_reference', reference=_registry(registry_path)['references'][ref_id]))
+
+
+@mcp.tool()
+def sew_named_edges(registry_path: str, ref_a: str, edge_a: str, ref_b: str, edge_b: str,
+                    checkpoint_path: str, direction_a: bool = True, direction_b: bool = False) -> dict:
+    """Resolve named edges together, checkpoint and sew validated endpoints."""
+    def sew():
+        refs = _registry(registry_path)['references']
+        return _md_operation('sew_named_edges', reference_a=refs[ref_a], edge_a=edge_a,
+                             reference_b=refs[ref_b], edge_b=edge_b, checkpoint_path=checkpoint_path,
+                             direction_a=direction_a, direction_b=direction_b)
+    return _local_call(sew)
+
+
+@mcp.tool()
+def measure_patterns(pattern_indices: list[int], targets: list[dict] | None = None) -> dict:
+    """Measure 2D boundary lengths and compare explicit edge targets/tolerances in native units."""
+    return _md_operation('measure_patterns', pattern_indices=pattern_indices, targets=targets)
+
+
+def _fit_inputs(output_dir, observations, preview_count):
+    folder = Path(operations._path(output_dir))
+    if folder.exists() and (not folder.is_dir() or any(folder.iterdir())):
+        raise ValueError('Fitting output requires a new or empty directory')
+    operations._integer(preview_count, 'preview_count', minimum=1, maximum=8)
+    observations = [] if observations is None else observations
+    if not isinstance(observations, list) or len(observations) > 50 or any(not isinstance(x,str) or len(x)>2000 for x in observations):
+        raise ValueError('Provide at most 50 observation strings of 2000 characters each')
+    return folder, observations
+
+
+def _fit_measurements(pattern_indices, targets, seam_pairs):
+    measured = measure_patterns(pattern_indices, targets)
+    sewing = {'ok': True, 'skipped': True, 'scope': 'no explicit seam pairs supplied'} if seam_pairs is None or seam_pairs == [] else diagnose_sewing(seam_pairs)
+    return {'ok': measured.get('ok', False) and sewing.get('ok', False), 'measurements': measured, 'sewing': sewing}
+
+
+def _fit_result(outcome, folder, observations, preview_count):
+    outcome.update(observations=observations, observations_source='caller supplied; not sensor measurements',
+                   fit_certified=False, scope='images and 2D edge measurements; inspect 3D fit, wrinkles and collisions visually')
+    images = []
+    if outcome.get('ok'):
+        folder.mkdir(parents=True, exist_ok=True)
+        preview = preview_garment(str(folder), image_count=preview_count, width=1024, height=1024)
+        preview_status = json.loads(preview.content[0].text)
+        outcome['preview'] = preview_status
+        outcome['ok'] = preview_status.get('ok', False)
+        images = [item for item in preview.content if isinstance(item, ImageContent)]
+    if folder.is_dir():
+        _attach_report(outcome, str(folder / 'fit-report.json'))
+    return CallToolResult(content=[TextContent(type='text', text=json.dumps(outcome, ensure_ascii=False)), *images],
+                          isError=not outcome.get('ok', False))
+
+
+def _fit_error(outcome):
+    return CallToolResult(content=[TextContent(type='text', text=json.dumps(outcome))], isError=True)
+
+
+@mcp.tool()
+def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: list[dict] | None = None,
+                       seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
+                       preview_count: int = 4) -> CallToolResult:
+    """Return garment images, edge target comparisons, seam diagnostics and a saved fit report.
+
+    Does not simulate. Observations are caller supplied; no automated body collision,
+    pressure, strain, wrinkle or fit certification is inferred from measurements.
+    """
+    try:
+        folder, observations = _fit_inputs(output_dir, observations, preview_count)
+        return _fit_result(_fit_measurements(pattern_indices, targets, seam_pairs), folder, observations, preview_count)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return _fit_error({'ok': False, 'error': str(exc)})
+
+
+def _save_manifest(outcome, path):
+    if outcome.get('manifest'):
+        saved = _local_call(lambda: _write_json(path, outcome['manifest']))
+        outcome['manifest_file'] = saved
+        if not saved['ok']:
+            outcome.update(ok=False, manifest_error=saved['error'])
+    return outcome
+
+
+@mcp.tool()
+def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_steps: int = 1,
+                     quality: int = 2, simulation_mode: int = 0, targets: list[dict] | None = None,
+                     seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
+                     preview_count: int = 4, timeout: float = 300.0) -> CallToolResult:
+    """Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report.
+
+    steps is the native Simulate(int) argument, limited to 1–200. Quality 0 normal,
+    1 animation, 2 fitting; mode 0 CPU, 1 GPU. Leaves requested quality active.
+    Inspect results before an explicit correction; timeout does not cancel MD.
+    """
+    outcome = {'ok': False}
+    try:
+        folder, observations = _fit_inputs(output_dir, observations, preview_count)
+        preflight = _fit_measurements(pattern_indices, targets, seam_pairs)
+        if not preflight['ok']:
+            return _fit_error(preflight)
+        outcome = _md_operation('prepare_fitting_pass', timeout=timeout, checkpoint_path=str(folder/'before.zprj'),
+                                simulation_steps=simulation_steps, quality=quality, simulation_mode=simulation_mode)
+        if outcome.get('checkpoint'):
+            _save_manifest(outcome['checkpoint'], str(folder/'before.checkpoint.json'))
+            if not outcome['checkpoint']['ok']:
+                outcome['ok'] = False
+        if outcome.get('ok'):
+            outcome.update(_fit_measurements(pattern_indices, targets, seam_pairs))
+        return _fit_result(outcome, folder, observations, preview_count)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        outcome.update(ok=False, error=str(exc))
+        return _fit_error(outcome)
+
+
+@mcp.tool()
+def apply_fit_adjustments(registry_path: str, adjustments: list[dict], checkpoint_path: str,
+                          max_move: float = 100.0) -> dict:
+    """Checkpoint and apply explicit bounded move_2d, layer or resolution corrections to named pieces.
+
+    Preflights all adjustments, stops on failure and saves updated references for
+    verified completed changes. This does not resize geometry or infer body fit.
+    """
+    def apply():
+        registry = _registry(registry_path)
+        manifest_path = str(Path(operations._path(checkpoint_path, '.zprj')).with_suffix('.checkpoint.json'))
+        if Path(manifest_path).exists():
+            raise ValueError('Correction checkpoint manifest already exists')
+        outcome = _md_operation('apply_fit_adjustments', references=registry['references'], adjustments=adjustments,
+                                checkpoint_path=checkpoint_path, max_move=max_move)
+        if outcome.get('checkpoint'):
+            _save_manifest(outcome['checkpoint'], manifest_path)
+            if not outcome['checkpoint']['ok']:
+                outcome.update(ok=False, partial_change_possible=True)
+        if outcome.get('updated_references') is not None:
+            registry['references'] = outcome['updated_references']
+            saved = _local_call(lambda: _write_json(registry_path, registry, overwrite=True))
+            outcome['registry'] = saved
+            if not saved['ok']:
+                outcome.update(ok=False, registry_error=saved['error'], partial_change_possible=True)
+        return outcome
+    return _local_call(apply)
+
+
+@mcp.tool()
+def create_scene_checkpoint(path: str) -> dict:
+    """Save a fresh .zprj plus .checkpoint.json manifest with SHA-256 and pattern count/names."""
+    def create():
+        manifest_path = str(Path(operations._path(path, '.zprj')).with_suffix('.checkpoint.json'))
+        if Path(manifest_path).exists():
+            raise ValueError('Checkpoint manifest already exists')
+        return _save_manifest(_md_operation('create_scene_checkpoint', path=path), manifest_path)
+    return _local_call(create)
+
+
+@mcp.tool()
+def restore_checkpoint(manifest_path: str, preserve_current_path: str) -> dict:
+    """Verify a checkpoint hash, preserve the current scene, load and verify count/names.
+
+    Requires a fresh preservation path. No automatic rollback/retry; successful
+    loading and count/name verification do not certify every cloth or avatar detail.
+    """
+    def restore():
+        backup_manifest = str(Path(operations._path(preserve_current_path, '.zprj')).with_suffix('.checkpoint.json'))
+        if Path(backup_manifest).exists():
+            raise ValueError('Preservation manifest already exists')
+        outcome = _md_operation('restore_checkpoint', manifest=_read_json(manifest_path),
+                                preserve_current_path=preserve_current_path)
+        if outcome.get('preserved'):
+            _save_manifest(outcome['preserved'], backup_manifest)
+            if not outcome['preserved']['ok']:
+                outcome.update(ok=False, partial_change_possible=True)
+        return outcome
+    return _local_call(restore)
+
+
+@mcp.tool()
+def get_operation_history(limit: int = 25) -> dict:
+    """Read recent registered MD operation statuses/IDs/digests for this server process (up to 100)."""
+    def history():
+        operations._integer(limit, 'limit', minimum=1, maximum=100)
+        with _history_lock:
+            entries = [dict(entry) for entry in list(_history)[-limit:]]
+        return {'ok': True, 'operations': entries, 'scope': 'this process only; excludes legacy raw Python tools'}
+    return _local_call(history)
+
+
+@mcp.tool()
+def save_operation_history(path: str, overwrite: bool = False) -> dict:
+    """Persist the current process's operation journal to JSON; contains digests, not replayable code."""
+    return _local_call(lambda: _write_json(path, get_operation_history(100), overwrite))
