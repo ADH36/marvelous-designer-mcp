@@ -30,10 +30,13 @@ import contextlib
 import io
 import json
 import socket
+import time
 import traceback
 
 HOST = "127.0.0.1"
 PORT = 7421
+MAX_REQUEST_BYTES = 1024 * 1024
+REQUEST_READ_TIMEOUT = 5.0
 
 # Persists across execute_python calls within one listener session.
 _persistent_globals: dict = {"__name__": "__md_mcp__"}
@@ -69,13 +72,25 @@ HANDLERS = {
 
 
 def _read_line(conn: socket.socket) -> bytes | None:
+    """Read one bounded JSON line so an idle local client cannot hold MD's GUI."""
     buf = bytearray()
-    while b"\n" not in buf:
-        chunk = conn.recv(65536)
+    deadline = time.monotonic() + REQUEST_READ_TIMEOUT
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"request line timed out after {REQUEST_READ_TIMEOUT:g}s")
+        conn.settimeout(remaining)
+        chunk = conn.recv(min(65536, MAX_REQUEST_BYTES + 1 - len(buf)))
         if not chunk:
             return None
         buf.extend(chunk)
-    return bytes(buf).split(b"\n", 1)[0]
+        newline = buf.find(b"\n")
+        if newline >= 0:
+            if newline > MAX_REQUEST_BYTES:
+                raise ValueError(f"request line exceeds {MAX_REQUEST_BYTES} bytes")
+            return bytes(buf[:newline])
+        if len(buf) > MAX_REQUEST_BYTES:
+            raise ValueError(f"request line exceeds {MAX_REQUEST_BYTES} bytes")
 
 
 def _serve_conn(conn: socket.socket) -> bool:
@@ -85,7 +100,12 @@ def _serve_conn(conn: socket.socket) -> bool:
     connection is all that's needed (and avoids odd Windows socket-reuse issues).
     """
     with conn:
-        line = _read_line(conn)
+        try:
+            line = _read_line(conn)
+        except (socket.timeout, TimeoutError, ValueError) as e:
+            resp = {"id": None, "error": str(e)}
+            conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))
+            return True
         if line is None:
             return True  # client connected then closed without sending anything
         try:

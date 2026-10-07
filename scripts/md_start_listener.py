@@ -34,17 +34,19 @@ def _log(msg: str) -> None:
         pass
 
 
-# Locate the md_addon directory (where md_listener.py lives). When this file runs
-# as a script/plugin, __file__ is usually set; fall back to a hard-coded path that
-# you can edit if your clone is elsewhere.
+# Locate the md_addon directory (where md_listener.py lives). Registered plugins
+# and scripts use their own location; pasted code can use MD_MCP_ADDON_DIR.
 try:
     _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
     _ADDON_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "md_addon"))
 except NameError:
-    _ADDON_DIR = r"C:\Users\azoo\git\marvelous-designer-mcp\md_addon"  # <-- edit if needed
+    _ADDON_DIR = os.environ.get("MD_MCP_ADDON_DIR", "").strip()
 
-if not os.path.isdir(_ADDON_DIR):
-    _ADDON_DIR = r"C:\Users\azoo\git\marvelous-designer-mcp\md_addon"  # <-- edit if needed
+if not _ADDON_DIR or not os.path.isdir(_ADDON_DIR):
+    raise RuntimeError(
+        "Cannot locate md_addon. Register this launcher as an MD plug-in, or set "
+        "MD_MCP_ADDON_DIR to this repository's md_addon directory before starting MD."
+    )
 
 if _ADDON_DIR not in sys.path:
     sys.path.insert(0, _ADDON_DIR)

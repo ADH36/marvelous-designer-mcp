@@ -63,7 +63,10 @@ launch `Plugins ▸ Plug-in ▸ md_start_listener` is there waiting to be clicke
 **Option A — paste into the Python Editor.** Open `Plugins ▸ Python Editor`, paste
 **the whole contents of `scripts/md_start_listener.py`**, run it. (Paste it in
 one go from a text editor — pasting line by line can mangle indentation.) Good
-for development; the editor's console shows prints.
+for development; the editor's console shows prints. Because pasted code has no
+`__file__`, set `MD_MCP_ADDON_DIR` in the environment before launching MD, pointing
+to this checkout's `md_addon` directory. Registering the launcher as a plug-in
+does not require this setting.
 
 Either way, status and errors are appended to `~\md_mcp_listener.log` (handy in
 plugin mode, where stdout may not be visible).
@@ -143,6 +146,10 @@ for CLO 3D and for the day MD adds a `.dll` loader; see `cpp_plugin/README.md`.
   prompt, error popup, file picker) hangs the listener forever, because MD's GUI
   thread is stuck in our loop. Recovery: close MD. The wrappers pick dialog-free
   call variants where possible.
+- **Incomplete client requests are bounded.** The listener closes a connection
+  that does not finish its newline-terminated request within 5 seconds or whose
+  request exceeds 1 MiB. This keeps an idle or oversized local client from
+  holding the GUI thread indefinitely.
 - **Heavy ops are slow.** Exporting a large `.zprj` (e.g. with an embedded Alembic
   animation), simulation and rendering can take a long time; the bridge timeout
   defaults to 120s — raise `MD_MCP_TIMEOUT` (seconds) for very long renders.
@@ -157,6 +164,9 @@ for CLO 3D and for the day MD adds a `.dll` loader; see `cpp_plugin/README.md`.
 | `MD_MCP_HOST` | `127.0.0.1` | listener host the bridge connects to |
 | `MD_MCP_PORT` | `7421` | listener port |
 | `MD_MCP_TIMEOUT` | `120.0` | bridge socket timeout, seconds |
+
+The listener-side request read timeout and 1 MiB request limit are defined in
++`md_addon/md_listener.py` (`REQUEST_READ_TIMEOUT` and `MAX_REQUEST_BYTES`).
 
 (The listener side's host/port are constants in `md_addon/md_listener.py` — keep
 them in sync if you change the defaults.)
