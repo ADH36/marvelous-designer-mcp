@@ -7,11 +7,12 @@ from PIL import Image, ImageOps
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from . import bridge, operations
+from . import bridge, operations, recipes
 from .config import MD_HOST, MD_PORT
 
 mcp = FastMCP("marvelous-designer")
 _OPERATION_SOURCE = Path(operations.__file__).read_text(encoding="utf-8")
+_RECIPE_SOURCE = Path(recipes.__file__).read_text(encoding="utf-8")
 
 
 def _md_exec(code: str, *, timeout: float | None = None) -> dict:
@@ -39,7 +40,7 @@ def _md_operation(operation: str, *, timeout: float | None = None, **params) -> 
         encoded = json.dumps(params, allow_nan=False, ensure_ascii=True)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}
-    code = _OPERATION_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
+    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
     response = _md_exec(code, timeout=timeout)
     if response.get("ok") and isinstance(response.get("result"), dict):
         outcome = response["result"]
@@ -148,21 +149,15 @@ def list_fabrics() -> dict:
 
 
 @mcp.tool()
-def assign_fabric(fabric_index: int, pattern_index: int, face: int = 2) -> dict:
-    """Assign a fabric to a pattern piece via fabric_api.AssignFabricToPattern(fabric, pattern, face).
+def assign_fabric(fabric_index: int, pattern_index: int, assignment_mode: int = 1,
+                  face: int | None = None) -> dict:
+    """Assign fabric with colorway mode 1=current, 2=all unlinked, 3=all linked.
 
-    `face` is the MD third int argument (commonly 0=front, 1=back, 2=both); default 2.
-    On a signature mismatch the raw TypeError is returned so the real meaning can be found.
+    face is a deprecated alias for the numeric assignment mode, not a surface face.
+    Default mode 1 limits changes to the current colorway.
     """
-    code = (
-        "import fabric_api\n"
-        f"fi, pi, fc = {int(fabric_index)}, {int(pattern_index)}, {int(face)}\n"
-        "try:\n"
-        "    result = {'ok': bool(fabric_api.AssignFabricToPattern(fi, pi, fc))}\n"
-        "except TypeError as e:\n"
-        "    result = {'ok': False, 'signature_error': str(e)}\n"
-    )
-    return _md_exec(code)
+    return _md_operation('assign_fabric_batch', fabric_index=fabric_index,
+                         pattern_indices=[pattern_index], assignment_mode=assignment_mode, face=face)
 
 
 @mcp.tool()
@@ -329,14 +324,15 @@ def sew_edges(pattern_a: int, line_a: int, pattern_b: int, line_b: int,
 
 
 @mcp.tool()
-def assign_fabric_batch(fabric_index: int, pattern_indices: list[int], face: int = 2) -> dict:
+def assign_fabric_batch(fabric_index: int, pattern_indices: list[int], assignment_mode: int = 1,
+                       face: int | None = None) -> dict:
     """Assign one fabric to multiple pieces with preflight bounds checks.
 
-    face is the raw MD face code. Reports read-back pattern fabric indices and
-    completed pieces on failure; face-specific visual appearance is not verified.
+    Modes: 1=current colorway, 2=all unlinked, 3=all linked. face is a deprecated
+    numeric alias. Reports read-back indices and completed pieces on failure.
     """
     return _md_operation("assign_fabric_batch", fabric_index=fabric_index,
-                         pattern_indices=pattern_indices, face=face)
+                         pattern_indices=pattern_indices, assignment_mode=assignment_mode, face=face)
 
 
 @mcp.tool()
@@ -465,3 +461,275 @@ def garment_workflow(output_dir: str, avatar_path: str = "", garment_path: str =
                 outcome['ok'] = False
                 outcome['error'] = stage['error']
     return outcome
+
+
+def _local_call(callback) -> dict:
+    try:
+        return callback()
+    except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
+        return {'ok': False, 'error': str(exc)}
+
+
+def _read_json(path: str) -> dict:
+    path = operations._path(path, '.json', must_exist=True)
+    if Path(path).stat().st_size > 1024 * 1024:
+        raise ValueError('JSON document exceeds 1 MiB')
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError('Duplicate JSON key: ' + key)
+            obj[key] = value
+        return obj
+    def invalid(value):
+        raise ValueError('Nonfinite JSON constant: ' + value)
+    return json.loads(Path(path).read_text(encoding='utf-8'), object_pairs_hook=unique, parse_constant=invalid)
+
+
+def _write_json(path: str, value: dict, overwrite: bool = False) -> dict:
+    path = operations._path(path, '.json')
+    encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2)
+    if len(encoded.encode('utf-8')) > 1024 * 1024:
+        raise ValueError('JSON document exceeds 1 MiB')
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w' if overwrite else 'x', encoding='utf-8') as file:
+        file.write(encoded)
+    return {'ok': True, 'path': path, 'bytes': Path(path).stat().st_size}
+
+
+def _finish_previews(outcome):
+    for stage in outcome.get('stages', []):
+        if stage['stage'] == 'previews' and stage.get('ok'):
+            _resize_turntable(stage, 1024, 1024)
+            if not stage['ok']:
+                outcome['ok'] = False
+                outcome['error'] = stage['error']
+    return outcome
+
+
+def _attach_report(outcome, path):
+    report = _local_call(lambda: _write_json(path, outcome))
+    outcome['report'] = report
+    if not report['ok']:
+        # File/report failures must not erase completed scene mutations and stages.
+        outcome['ok'] = False
+        outcome['report_error'] = report['error']
+        outcome['partial_change_possible'] = True
+    return outcome
+
+
+@mcp.tool()
+def create_pattern(points: list[list[float]], name: str, coordinate_scale: float = 1.0) -> dict:
+    """Create a named straight-edge polygon from [x,y] points in MD native units.
+
+    coordinate_scale is explicit; 1 preserves input coordinates. Rejects degenerate
+    and self-intersecting polygons before MD. Save a checkpoint before scene edits.
+    """
+    return _md_operation('create_pattern', points=points, name=name, coordinate_scale=coordinate_scale)
+
+
+@mcp.tool()
+def create_rectangle(width: float, height: float, name: str,
+                     origin_x: float = 0.0, origin_y: float = 0.0) -> dict:
+    """Create a rectangle in MD native units; boundary starts at the origin."""
+    def create():
+        w = recipes.recipe_number(width, 'width', True)
+        h = recipes.recipe_number(height, 'height', True)
+        x = recipes.recipe_number(origin_x, 'origin_x')
+        y = recipes.recipe_number(origin_y, 'origin_y')
+        return create_pattern([[x,y], [x+w,y], [x+w,y+h], [x,y+h]], name)
+    return _local_call(create)
+
+
+@mcp.tool()
+def diagnose_sewing(seam_pairs: list[dict], tolerance_percent: float = 5.0) -> dict:
+    """Compare explicit boundary pairs, report length mismatches/reused edges and a sewing map.
+
+    Each pair contains pattern_a, line_a, pattern_b, line_b. Read-only; it does not
+    infer existing seam endpoints or certify fit or seam orientation.
+    """
+    return _md_operation('diagnose_sewing', seam_pairs=seam_pairs, tolerance_percent=tolerance_percent)
+
+
+@mcp.tool()
+def import_fabric(path: str) -> dict:
+    """Import an existing absolute .zfab/.jfab path; verify its index and name."""
+    return _md_operation('import_fabric', path=path)
+
+
+@mcp.tool()
+def replace_fabric(fabric_index: int, path: str) -> dict:
+    """Replace an existing fabric using a .zfab file. Verify appearance separately."""
+    return _md_operation('replace_fabric', fabric_index=fabric_index, path=path)
+
+
+@mcp.tool()
+def build_skirt_recipe(waist_cm: float, length_cm: float, hem_cm: float,
+                       ease_cm: float = 2.0, native_units_per_cm: float = 10.0) -> dict:
+    """Build a data-only two-panel skirt block with matching side seams.
+
+    Does not change MD. native_units_per_cm is explicit calibration (10 for mm).
+    This is a starting block without darts, openings, waistband or seam allowance;
+    avatar arrangement and fit validation remain required.
+    """
+    return _local_call(lambda: {'ok': True, 'recipe': recipes.skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm, native_units_per_cm)})
+
+
+@mcp.tool()
+def save_garment_recipe(path: str, recipe: dict, overwrite: bool = False) -> dict:
+    """Validate and save a reusable JSON recipe; refuses overwrite by default."""
+    return _local_call(lambda: _write_json(path, recipes.validate_recipe(recipe), overwrite))
+
+
+@mcp.tool()
+def load_garment_recipe(path: str) -> dict:
+    """Load and validate a data-only recipe JSON, with no scene changes."""
+    return _local_call(lambda: {'ok': True, 'recipe': recipes.validate_recipe(_read_json(path))})
+
+
+@mcp.tool()
+def apply_garment_recipe(recipe: dict, output_dir: str = '', dry_run: bool = True,
+                         timeout: float = 300.0) -> dict:
+    """Review or apply an explicit garment recipe. Dry-run is the default.
+
+    Application requires an empty absolute directory, saves before.zprj, appends
+    pieces, verifies boundary lengths/order, sews, optionally imports/assigns fabric,
+    saves project/OBJ/previews. Stops at failure; no rollback or automatic simulation.
+    """
+    def apply():
+        normalized = recipes.validate_recipe(recipe)
+        if dry_run:
+            return {'ok': True, 'dry_run': True, 'recipe': normalized,
+                    'actions': ['checkpoint', 'create patterns', 'validate/sew provided pairs',
+                                'optional fabric import/assignment', 'save project', 'export OBJ', 'optional previews'],
+                    'fit': 'not arranged or simulated'}
+        outcome = _finish_previews(_md_operation('apply_garment_recipe', timeout=timeout,
+                                                 recipe=normalized, output_dir=output_dir))
+        if Path(output_dir).is_absolute() and Path(output_dir).is_dir() and outcome.get('stages'):
+            _attach_report(outcome, str(Path(output_dir) / 'recipe-result.json'))
+        return outcome
+    return _local_call(apply)
+
+
+@mcp.tool()
+def animation_state() -> dict:
+    """Read the current animation frame and start/end range."""
+    return _md_operation('animation_state')
+
+
+@mcp.tool()
+def configure_animation(start_frame: float, end_frame: float) -> dict:
+    """Set an animation frame range with read-back checks. Does not simulate."""
+    return _md_operation('configure_animation', start_frame=start_frame, end_frame=end_frame)
+
+
+@mcp.tool()
+def record_animation(start_frame: float, end_frame: float, checkpoint_path: str,
+                      timeout: float = 300.0) -> dict:
+    """Checkpoint then run MD animation recording for an explicit frame range.
+
+    Recording changes the cloth cache. A timeout does not cancel it; inspect state
+    before retrying. Completion alone does not certify visible motion quality.
+    """
+    return _md_operation('record_animation', timeout=timeout, start_frame=start_frame,
+                         end_frame=end_frame, checkpoint_path=checkpoint_path)
+
+
+@mcp.tool()
+def export_alembic(path: str, scale: float = 1.0, include_avatar: bool = False,
+                    overwrite: bool = False, timeout: float = 120.0) -> dict:
+    """Export garment animation to a fresh Alembic file using explicit options.
+
+    Existing animation/cache is required. File verification does not certify that
+    the cache contains motion; inspect the animation at the destination.
+    """
+    return _md_operation('export_alembic', timeout=timeout, path=path, scale=scale,
+                         include_avatar=include_avatar, overwrite=overwrite)
+
+
+def _validate_profile(profile):
+    recipes.recipe_keys(profile, ('schema_version', 'destination', 'scale', 'axis_options', 'validated', 'calibration_note'),
+                        ('schema_version', 'destination', 'scale', 'axis_options', 'validated', 'calibration_note'), 'export profile')
+    if type(profile['schema_version']) is not int or profile['schema_version'] != 1:
+        raise ValueError('Unsupported export profile version')
+    if profile['destination'] not in ('DAZ', 'Blender', 'Unity', 'custom'):
+        raise ValueError('Unknown destination')
+    recipes.recipe_number(profile['scale'], 'scale', True)
+    axes = profile['axis_options']
+    recipes.recipe_keys(axes, ('axisX','axisY','axisZ','bInvertX','bInvertY','bInvertZ'),
+                        ('axisX','axisY','axisZ','bInvertX','bInvertY','bInvertZ'), 'axis options')
+    for key in ('axisX','axisY','axisZ'):
+        operations._integer(axes[key], key)
+    if len({axes[k] for k in ('axisX','axisY','axisZ')}) != 3:
+        raise ValueError('Axes must use three distinct installed MD axis codes')
+    if any(type(axes[k]) is not bool for k in ('bInvertX','bInvertY','bInvertZ')) or type(profile['validated']) is not bool:
+        raise ValueError('Profile flags must be booleans')
+    if not isinstance(profile['calibration_note'], str) or not profile['calibration_note'].strip():
+        raise ValueError('Record scale/orientation calibration or explain what remains unverified')
+    return profile
+
+
+@mcp.tool()
+def save_export_profile(path: str, destination: Literal['DAZ','Blender','Unity','custom'],
+                         scale: float, axis_codes: list[int], invert_axes: list[bool],
+                         calibration_note: str, validated: bool = False, overwrite: bool = False) -> dict:
+    """Save explicit destination scale/axes. No destination defaults are guessed.
+
+    axis_codes are MD numeric codes for X/Y/Z; invert_axes are three boolean flags.
+    Mark validated only after checking scale/orientation at the destination.
+    """
+    def save():
+        if len(axis_codes) != 3 or len(invert_axes) != 3:
+            raise ValueError('Provide three axis codes and three inversion flags')
+        profile = {'schema_version': 1, 'destination': destination, 'scale': scale,
+                   'axis_options': dict(zip(('axisX','axisY','axisZ','bInvertX','bInvertY','bInvertZ'), axis_codes+invert_axes)),
+                   'validated': validated, 'calibration_note': calibration_note}
+        return _write_json(path, _validate_profile(profile), overwrite)
+    return _local_call(save)
+
+
+@mcp.tool()
+def export_obj_with_profile(path: str, profile_path: str, thin: bool = True,
+                            single_object: bool = False, include_avatar: bool = False,
+                            unified_uv: bool = True, overwrite: bool = False, timeout: float = 120.0) -> dict:
+    """Export OBJ using a saved, destination-validated profile and explicit options."""
+    def export():
+        profile = _validate_profile(_read_json(profile_path))
+        if not profile['validated']:
+            raise ValueError('Profile is unverified; calibrate it at the destination first')
+        outcome = _md_operation('export_obj', timeout=timeout, path=path, scale=profile['scale'],
+                                axis_options=profile['axis_options'], thin=thin, single_object=single_object,
+                                include_avatar=include_avatar, unified_uv=unified_uv, overwrite=overwrite)
+        outcome['profile'] = profile
+        return outcome
+    return _local_call(export)
+
+
+@mcp.tool()
+def batch_garment_workflows(jobs: list[dict], output_dir: str, timeout: float = 600.0) -> dict:
+    """Process 1–50 .zprj projects independently with checkpoints and a JSON report.
+
+    Jobs contain project_path and optional simulation_steps (default 0), preview_count
+    (default 4), scale (default 1). Checkpoints the original, replaces the scene per
+    job, stops at first failure, and leaves the last loaded job active. No rollback.
+    """
+    def batch():
+        prepared = _md_operation('prepare_garment_batch', timeout=timeout, jobs=jobs, output_dir=output_dir)
+        if not prepared.get('ok'):
+            return prepared
+        outcome = {'ok': True, 'results': [], 'checkpoint': prepared['checkpoint'],
+                   'scene_after': 'last loaded job; original preserved in checkpoint'}
+        for position, job in enumerate(prepared['jobs']):
+            result = _finish_previews(_md_operation('process_garment_batch_job', timeout=timeout,
+                job=job, output_dir=str(Path(output_dir) / ('job_'+str(position).zfill(3)))))
+            outcome['results'].append({'job': position, 'project_path': job['project_path'], **result})
+            if not result['ok']:
+                outcome['ok'] = False
+                outcome['error'] = result.get('error', 'Batch job failed')
+                outcome['failed_job'] = position
+                outcome['partial_change_possible'] = True
+                break
+        if Path(output_dir).is_absolute() and Path(output_dir).is_dir() and 'results' in outcome:
+            _attach_report(outcome, str(Path(output_dir) / 'batch-result.json'))
+        return outcome
+    return _local_call(batch)

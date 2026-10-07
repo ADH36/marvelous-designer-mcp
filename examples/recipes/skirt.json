@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "name": "Two-panel skirt block",
+  "measurements": {
+    "waist_cm": 75.0,
+    "length_cm": 60.0,
+    "hem_cm": 120.0,
+    "ease_cm": 2.0,
+    "native_units_per_cm": 10.0
+  },
+  "pieces": [
+    {
+      "id": "front",
+      "name": "Skirt Front",
+      "points": [
+        [
+          -192.5,
+          0.0
+        ],
+        [
+          192.5,
+          0.0
+        ],
+        [
+          300.0,
+          600.0
+        ],
+        [
+          -300.0,
+          600.0
+        ]
+      ]
+    },
+    {
+      "id": "back",
+      "name": "Skirt Back",
+      "points": [
+        [
+          507.5,
+          0.0
+        ],
+        [
+          892.5,
+          0.0
+        ],
+        [
+          1000.0,
+          600.0
+        ],
+        [
+          400.0,
+          600.0
+        ]
+      ]
+    }
+  ],
+  "seams": [
+    {
+      "piece_a": "front",
+      "line_a": 1,
+      "piece_b": "back",
+      "line_b": 3,
+      "direction_a": true,
+      "direction_b": false
+    },
+    {
+      "piece_a": "front",
+      "line_a": 3,
+      "piece_b": "back",
+      "line_b": 1,
+      "direction_a": true,
+      "direction_b": false
+    }
+  ],
+  "export": {},
+  "preview_count": 4
+}

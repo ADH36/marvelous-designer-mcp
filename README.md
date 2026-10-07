@@ -115,7 +115,7 @@ tools to work.
 | `scene_info()` | Project name/path, MD version, pattern & fabric counts. |
 | `list_patterns()` | Pattern pieces: index, name, assigned fabric index. |
 | `list_fabrics()` | Fabrics: index, name (+ fabric-style list). |
-| `assign_fabric(fabric_index, pattern_index, face=2)` | `fabric_api.AssignFabricToPattern`. |
+| `assign_fabric(fabric_index, pattern_index, assignment_mode=1)` | Assign fabric to the current colorway (1), all unlinked (2), or all linked (3). |
 | `import_project(path)` | Open a `.zprj` / `.zpac` / `.obj` / `.fbx` / ... by absolute path (`import_api.ImportFile`). |
 | `export_project(path)` | Save the scene as a `.zprj` (`export_api.ExportZPrjW`). |
 | `simulate(steps=1)` | `utility_api.Simulate(int)`. |
@@ -131,16 +131,32 @@ tools to work.
 | `set_pattern_resolution(pattern_indices, particle_distance, mesh_type)` | Batch-edit particle distance and Triangle/Quad mesh type with read-back checks. |
 | `list_seams()` | List sewing groups. |
 | `sew_edges(pattern_a, line_a, pattern_b, line_b, ...)` | Sew validated boundary edges with explicit directions. |
-| `assign_fabric_batch(fabric_index, pattern_indices, face=2)` | Batch-assign a fabric and report partial failures. |
+| `assign_fabric_batch(fabric_index, pattern_indices, assignment_mode=1)` | Batch-assign a fabric and report partial failures. |
 | `create_fabric_from_textures(path, base_texture, ...)` | Create a .zfab preset from existing texture maps. |
 | `save_checkpoint(path, ...)` | Save and verify a .zprj checkpoint. |
 | `garment_workflow(output_dir, ...)` | Checkpoint, optionally append avatar/garment assets, simulate, save, export mesh and previews. |
+| `create_pattern(points, name, ...)`, `create_rectangle(width, height, name, ...)` | Create validated straight-edge pattern geometry. |
+| `diagnose_sewing(seam_pairs, ...)` | Compare explicit boundary pairs and return mismatches, reused edges and a sewing map. |
+| `import_fabric(path)`, `replace_fabric(fabric_index, path)` | Import .zfab/.jfab or replace an existing fabric using .zfab. |
+| `build_skirt_recipe(...)` | Generate a two-panel skirt block from measurements without changing MD. |
+| `save_garment_recipe(path, recipe)`, `load_garment_recipe(path)` | Persist and validate data-only JSON recipes. |
+| `apply_garment_recipe(recipe, ..., dry_run=True)` | Review a recipe or checkpoint, append pieces, sew, apply fabric and export. |
+| `animation_state()`, `configure_animation(start_frame, end_frame)` | Read/set animation ranges with read-back checks. |
+| `record_animation(start_frame, end_frame, checkpoint_path)` | Checkpoint then record cloth animation. |
+| `export_alembic(path, ...)` | Export an existing garment animation cache to Alembic. |
+| `save_export_profile(...)`, `export_obj_with_profile(path, profile_path)` | Save explicit destination calibration and reuse validated scale/axes. |
+| `batch_garment_workflows(jobs, output_dir)` | Replace the scene per .zprj job, checkpoint and export, then write a batch report. |
 
 Anything not covered by a wrapper: use `execute_python` directly.
 
-Version 0.3 adds 15 tools. See [feature usage and verified MD behavior](docs/features.md)
-for examples, checkpoint guidance and validation limits. Restart the MCP client
+Version 0.4 exposes 42 tools. See [garment/export contracts](docs/features.md) and
+[recipe, animation and batch examples](docs/recipes.md) for checkpoint guidance
+and validation limits. Restart the MCP client
 connection after updating so Codex, Hermes or another client discovers the tools.
+
+The old `face` keyword for fabric assignment remains a deprecated numeric alias;
+it never meant front/back/side. Mode 0 is rejected, mode 3 is now supported, and
+new calls default to the current colorway (1) instead of all unlinked (2).
 
 ## Development
 

@@ -4,7 +4,7 @@ A snapshot of what this repo is, what works, and what's been ruled out — so a
 future session (you, or a different person, or a future Claude) can pick up
 without re-discovering everything.
 
-Last update: 2026-10-07, package `v0.3.0` (upstream baseline `v0.2.0`).
+Last update: 2026-10-08, package `v0.4.0` (upstream baseline `v0.2.0`).
 
 ---
 
@@ -30,10 +30,31 @@ LLM ──MCP/stdio──▶ src/marvelous_designer_mcp (FastMCP)
 |---|---|
 | Python listener (v0.1.0) | **Works.** Blocking main-thread server. MD's GUI freezes while running; `shutdown_listener` releases it. |
 | Plug-in auto-registration (`scripts/install_md_plugin.py`, v0.2.0) | **Works.** Idempotently writes MD's `pluginSettings.json` so the launcher appears under `Plugins ▸ Plug-in`. |
-| MCP tool wrappers | 26 tools: the original 11 plus previews, OBJ export, pattern inspection/editing, sewing, fabric batches/presets, verified checkpoints and staged workflows. See `docs/features.md` for contracts and which operations were tested live. |
+| MCP tool wrappers | 42 tools: the original 11, v0.3 exports/editing, and v0.4 pattern creation, sewing diagnostics, fabric import/replacement, data-only recipes, animation, calibrated destination profiles and independent project batches. See `docs/features.md` and `docs/recipes.md` for contracts and validation limits. |
 | C++ non-freezing plugin (`cpp_plugin/`) | **Code builds, doesn't load in MD.** Reserved for CLO 3D and for a hypothetical future MD that adds DLL loading. See `cpp_plugin/README.md`. |
 
 ## Key non-obvious facts (do not re-derive — verified empirically)
+
+### v0.4 design and automation
+
+- `recipes.py` is portable standard-library code, supplied alongside
+  `operations.py` to MD. Recipes are JSON data, never executable scripts.
+- `apply_garment_recipe` defaults to a local dry-run. Applying creates a
+  checkpoint before adding geometry, checks boundary index/length sequences,
+  and stops at the first failed stage. It does not arrange or simulate pieces.
+- Fabric assignment's third argument is a COLORWAY mode, per current official
+  documentation: 1=current, 2=all unlinked, 3=all linked. `face` is only a
+  deprecated numeric alias. Zero is rejected, and the new default is 1.
+- Project batches use `ImportZprjW` with explicit `bAppend=False`, preserving an
+  original checkpoint and replacing the scene per job. Last job remains active.
+- Destination profiles need explicit scale/axis codes and a calibration note.
+  They are not bundled verified DAZ/Blender/Unity conversions.
+- New v0.4 scene mutations have contract/generated-script tests, but no live MD
+  mutation validation yet. Official examples establish candidate APIs; missing
+  installed APIs fail explicitly. Do not describe these as fitted garment output.
+- The package pins MCP SDK `<2`: a clean wheel installation otherwise selected
+  SDK 2.x, which removed the FastMCP import used here. Keep this constraint until
+  the server and its schemas are deliberately migrated.
 
 ### Additional observations on MD 2026.0.315
 
@@ -104,8 +125,9 @@ LLM ──MCP/stdio──▶ src/marvelous_designer_mcp (FastMCP)
 ```
 src/marvelous_designer_mcp/
 ├── __main__.py    `python -m marvelous_designer_mcp` entry
-├── server.py      FastMCP tools (26 total)
+├── server.py      FastMCP tools (42 total)
 ├── operations.py  self-contained feature operations sent to MD
+├── recipes.py     portable geometry and data-only recipe validation
 ├── bridge.py      TCP JSON-line client
 └── config.py      HOST / PORT / TIMEOUT (env-overridable)
 md_addon/
@@ -131,9 +153,9 @@ pyproject.toml / uv.lock
 - The C++ path: only worth resurrecting if (a) CLO Virtual Fashion adds DLL
   loading to MD, or (b) the goal moves to CLO 3D. The existing `cpp_plugin/`
   builds and is set up to receive new wrapper methods one by one.
-- Areas not implemented: techpack export, multi-colorway handling, parametric
-  garment creation and physical fabric presets. Turntable/custom-view exports
-  and optional avatar imports in staged workflows are available in v0.3.
+- Areas not implemented: native techpack export, automatic avatar arrangement,
+  advanced fitted garment blocks, automatic existing-seam extraction and physical
+  fabric tuning. Basic polygons/skirt blocks, Alembic and batches are in v0.4.
 
 ## Things explicitly tried and ruled out
 

@@ -1,6 +1,7 @@
 # Garment tools (v0.3)
 
-The server exposes 26 tools, including 15 new garment and export tools. All paths
+The server now exposes 42 tools; this page documents the original v0.3 feature
+set. See [v0.4 recipes and automation](recipes.md) for the 16 additional tools. All paths
 must be absolute. The client and MD run on the same machine. API calls still run
 on MD's GUI thread; these features do not remove the listener's GUI blocking.
 
@@ -74,10 +75,11 @@ mutation and read settings back. Failed batches report `completed`,
 
 ## Fabrics
 
-`assign_fabric_batch(fabric_index, pattern_indices, face=2)` checks indices before
+`assign_fabric_batch(fabric_index, pattern_indices, assignment_mode=1)` checks indices before
 assignment and reports the fabric index read back for each completed piece.
-The face argument remains MD's raw face code; this read-back does not verify
-face-specific appearance or physical drape.
+Modes are 1=current colorway, 2=all unlinked, 3=all linked. The deprecated `face`
+keyword forwards a numeric mode, not a surface face. Assignment read-back does
+not verify each colorway's appearance or physical drape.
 
 `create_fabric_from_textures(path, base_texture, ...)` creates a `.zfab` file.
 Normal, displacement, opacity, roughness and metalness maps are optional absolute
