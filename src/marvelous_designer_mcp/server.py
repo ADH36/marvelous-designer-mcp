@@ -15,13 +15,14 @@ from PIL import Image, ImageOps
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from . import bridge, operations, recipes, advanced
+from . import bridge, operations, recipes, advanced, geometry
 from .config import MD_HOST, MD_PORT
 
 mcp = FastMCP("marvelous-designer")
 _OPERATION_SOURCE = Path(operations.__file__).read_text(encoding="utf-8")
 _RECIPE_SOURCE = Path(recipes.__file__).read_text(encoding="utf-8")
 _ADVANCED_SOURCE = Path(advanced.__file__).read_text(encoding="utf-8")
+_GEOMETRY_SOURCE = Path(geometry.__file__).read_text(encoding="utf-8")
 _history = deque(maxlen=100)
 _history_lock = Lock()
 
@@ -51,7 +52,7 @@ def _execute_md_operation(operation: str, *, timeout: float | None = None, **par
         encoded = json.dumps(params, allow_nan=False, ensure_ascii=True)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}
-    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + '\n' + _ADVANCED_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
+    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + '\n' + _ADVANCED_SOURCE + '\n' + _GEOMETRY_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
     response = _md_exec(code, timeout=timeout)
     if response.get("ok") and isinstance(response.get("result"), dict):
         outcome = response["result"]
@@ -618,14 +619,17 @@ def replace_fabric(fabric_index: int, path: str) -> dict:
 
 @mcp.tool()
 def build_skirt_recipe(waist_cm: float, length_cm: float, hem_cm: float,
-                       ease_cm: float = 2.0, native_units_per_cm: float = 10.0) -> dict:
+                       ease_cm: float = 2.0, native_units_per_cm: float = 10.0,
+                       vertical_direction: Literal['down','up'] = 'down') -> dict:
     """Build a data-only two-panel skirt block with matching side seams.
 
     Does not change MD. native_units_per_cm is explicit calibration (10 for mm).
+    down uses negative Y, as observed in MD 2026; up preserves the old positive-Y draft.
     This is a starting block without darts, openings, waistband or seam allowance;
     avatar arrangement and fit validation remain required.
     """
-    return _local_call(lambda: {'ok': True, 'recipe': recipes.skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm, native_units_per_cm)})
+    return _local_call(lambda: {'ok': True, 'recipe': recipes.skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm, native_units_per_cm, vertical_direction),
+                              'coordinate_convention':{'vertical_direction':vertical_direction,'downward_y_sign':-1 if vertical_direction=='down' else 1}})
 
 
 @mcp.tool()
@@ -833,9 +837,14 @@ def export_pattern_json(path: str, overwrite: bool = False) -> dict:
 
 
 @mcp.tool()
-def import_pattern_json(path: str, checkpoint_path: str) -> dict:
-    """Checkpoint then import edited MD-native pattern JSON; refresh indices and references."""
-    return _md_operation('import_pattern_json', path=path, checkpoint_path=checkpoint_path)
+def import_pattern_json(path: str, checkpoint_path: str, preserve_settings: bool = True) -> dict:
+    """Checkpoint/import native JSON and restore known resolution, layer, solidify and fabric assignments.
+
+    Preservation requires exactly the current unique pattern names and uniquely
+    named fabrics. False explicitly allows replacement without settings recovery.
+    Physical fabric parameters, colorways and simulation caches are not certified.
+    """
+    return _md_operation('import_pattern_json', path=path, checkpoint_path=checkpoint_path,preserve_settings=preserve_settings)
 
 
 @mcp.tool()
@@ -858,7 +867,8 @@ def arrange_patterns(pattern_indices: list[int], arrangement_index: int,
 
     Discover indices first. orientation and [x,y,offset] position are explicit native
     API values; their interpretation needs installed-version confirmation. Inspect
-    placement visually before simulation.
+    placement visually before simulation. Property read-back does not establish
+    mesh movement; use arrange_patterns_verified to record before/after mesh evidence.
     """
     return _md_operation('arrange_patterns', pattern_indices=pattern_indices, arrangement_index=arrangement_index,
                          shape_style=shape_style, orientation=orientation, position=position)
@@ -868,6 +878,143 @@ def arrange_patterns(pattern_indices: list[int], arrangement_index: int,
 def get_pattern_layer(pattern_index: int) -> dict:
     """Read a pattern's simulation layer."""
     return _md_operation('get_pattern_layer', pattern_index=pattern_index)
+
+
+@mcp.tool()
+def capture_mesh_snapshot(path: str) -> dict:
+    """Export the visible garment OBJ and record bounds, centroid, counts and geometry digests."""
+    return _md_operation('capture_mesh_snapshot',path=path)
+
+
+@mcp.tool()
+def compare_mesh_snapshots(before_path: str, after_path: str, movement_threshold: float = 0.1) -> dict:
+    """Compare two local OBJ exports for mesh movement; no MD calls or fit certification."""
+    return _local_call(lambda: geometry.compare_meshes(before_path,after_path,movement_threshold))
+
+
+@mcp.tool()
+def arrange_patterns_verified(pattern_indices: list[int], arrangement_index: int, output_dir: str,
+                              shape_style: Literal['Flat','Curved'] = 'Flat',
+                              orientation: int | None = None, position: list[int] | None = None,
+                              movement_threshold: float = 0.1, require_movement: bool = True) -> dict:
+    """Checkpoint/apply arrangement and compare actual exported garment meshes before and after.
+
+    Unchanged or noncomparable meshes fail when require_movement=True. False allows
+    an intentional no-op with explicit movement evidence. No automatic redrape or
+    guessed 3D setter is attempted. Movement does not certify correct avatar fit.
+    """
+    return _md_operation('arrange_patterns_verified',pattern_indices=pattern_indices,
+                         arrangement_index=arrangement_index,output_dir=output_dir,shape_style=shape_style,
+                         orientation=orientation,position=position,movement_threshold=movement_threshold,
+                         require_movement=require_movement)
+
+
+@mcp.tool()
+def arrange_patterns_by_name(pattern_indices: list[int], arrangement_name: str, output_dir: str,
+                             shape_style: Literal['Flat','Curved'] = 'Flat',
+                             movement_threshold: float = 0.1, require_movement: bool = True) -> dict:
+    """Resolve an exact discovered avatar arrangement name and apply it with mesh evidence."""
+    return _md_operation('arrange_patterns_by_name',pattern_indices=pattern_indices,
+                         arrangement_name=arrangement_name,output_dir=output_dir,shape_style=shape_style,
+                         movement_threshold=movement_threshold,require_movement=require_movement)
+
+
+@mcp.tool()
+def inspect_native_pattern_geometry(pattern_index: int, export_path: str) -> dict:
+    """Export native geometry/control points/IDs alongside the actual API boundary edge map."""
+    return _md_operation('inspect_native_pattern_geometry',pattern_index=pattern_index,export_path=export_path)
+
+
+@mcp.tool()
+def build_bodice_block(bust_cm: float, length_cm: float, shoulder_width_cm: float,
+                      neck_width_cm: float, armhole_depth_cm: float,
+                      front_neck_depth_cm: float = 8.0, back_neck_depth_cm: float = 3.0,
+                      ease_cm: float = 4.0, native_units_per_cm: float = 10.0,
+                      vertical_direction: Literal['down','up'] = 'down') -> dict:
+    """Draft local front/back bodice spline templates with explicit cm scale and Y direction.
+
+    Returns vertices for create_curved_pattern, not sewn geometry or a fitted
+    sloper. Inspect actual native edges before binding seams and avatar placement.
+    """
+    measurements=dict(bust_cm=bust_cm,length_cm=length_cm,shoulder_width_cm=shoulder_width_cm,
+                      neck_width_cm=neck_width_cm,armhole_depth_cm=armhole_depth_cm,
+                      front_neck_depth_cm=front_neck_depth_cm,back_neck_depth_cm=back_neck_depth_cm,ease_cm=ease_cm)
+    return _local_call(lambda: recipes.garment_block('bodice',measurements,native_units_per_cm,vertical_direction))
+
+
+@mcp.tool()
+def build_sleeve_block(bicep_cm: float, cuff_cm: float, length_cm: float, cap_height_cm: float,
+                      ease_cm: float = 4.0, native_units_per_cm: float = 10.0,
+                      vertical_direction: Literal['down','up'] = 'down') -> dict:
+    """Draft a local spline sleeve template; cap-to-armhole matching and fit remain explicit."""
+    measurements=dict(bicep_cm=bicep_cm,cuff_cm=cuff_cm,length_cm=length_cm,cap_height_cm=cap_height_cm,ease_cm=ease_cm)
+    return _local_call(lambda: recipes.garment_block('sleeve',measurements,native_units_per_cm,vertical_direction))
+
+
+@mcp.tool()
+def create_fit_closeups(report_path: str, output_dir: str, regions: list[dict], output_size: int = 1024) -> CallToolResult:
+    """Crop caller-selected regions from saved fitting images into labeled MCP close-up images.
+
+    Each region: {name, view_index, box:[left,top,right,bottom]} with normalized
+    coordinates 0–1. Caller selects garment regions; no automatic collision sensing.
+    """
+    try:
+        report_file=Path(operations._path(report_path,'.json',must_exist=True))
+        report=_read_json(str(report_file))
+        if not isinstance(report,dict) or not isinstance(report.get('preview'),dict):
+            raise ValueError('Supply a saved fitting report with preview metadata')
+        sources=report['preview'].get('files',[])
+        if not isinstance(sources,list) or any(not isinstance(p,str) for p in sources):
+            raise ValueError('Preview metadata must list image paths')
+        sources=[Path(p) for p in sources if str(p).lower().endswith('.png')]
+        if not sources:
+            raise ValueError('The saved report has no preview PNG files')
+        folder=Path(operations._path(output_dir))
+        if folder.exists() and (not folder.is_dir() or any(folder.iterdir())):
+            raise ValueError('Close-ups require a new or empty output directory')
+        operations._integer(output_size,'output_size',minimum=128,maximum=2048)
+        if not isinstance(regions,list) or not 1<=len(regions)<=16:
+            raise ValueError('Supply 1–16 close-up regions')
+        planned=[]
+        for region in regions:
+            recipes.recipe_keys(region,('name','view_index','box'),('name','view_index','box'),'close-up region')
+            name=region['name']
+            if not isinstance(name,str) or not name.strip() or len(name)>128:
+                raise ValueError('Region name must be 1–128 characters')
+            index=operations._integer(region['view_index'],'view_index',maximum=len(sources)-1)
+            box=region['box']
+            if not isinstance(box,list) or len(box)!=4:
+                raise ValueError('box must be [left,top,right,bottom]')
+            box=[recipes.recipe_number(v,'box coordinate') for v in box]
+            if not 0<=box[0]<box[2]<=1 or not 0<=box[1]<box[3]<=1:
+                raise ValueError('Normalized crop bounds must be ordered within 0–1')
+            source=sources[index].resolve()
+            if not source.is_relative_to(report_file.parent.resolve()):
+                raise ValueError('Preview file must be inside the report directory')
+            if not source.is_file() or source.stat().st_size>8*1024*1024:
+                raise ValueError('Source PNG is missing or exceeds 8 MiB')
+            planned.append((name,source,box,index))
+        folder.mkdir(parents=True,exist_ok=True)
+        images=[]
+        crops=[]
+        for number,(name,source,box,index) in enumerate(planned):
+            with Image.open(source) as original:
+                if original.format!='PNG':
+                    raise ValueError('Preview source is not a PNG')
+                w,h=original.size
+                pixel_box=(int(box[0]*w),int(box[1]*h),int(box[2]*w),int(box[3]*h))
+                if pixel_box[0]>=pixel_box[2] or pixel_box[1]>=pixel_box[3]:
+                    raise ValueError('Crop is smaller than one pixel')
+                cropped=ImageOps.contain(original.crop(pixel_box).convert('RGB'),(output_size,output_size))
+                path=folder/f'closeup_{number:03d}.png'
+                cropped.save(path)
+            crops.append({'name':name,'source':str(source),'view_index':index,'box':box,'path':str(path)})
+            images.append(ImageContent(type='image',data=base64.b64encode(path.read_bytes()).decode(),mimeType='image/png'))
+        outcome={'ok':True,'regions':crops,'fit_certified':False,'region_source':'caller selected'}
+        _write_json(str(folder/'closeups.json'),outcome)
+        return CallToolResult(content=[TextContent(type='text',text=json.dumps(outcome)),*images])
+    except (OSError,ValueError,TypeError,KeyError,Image.DecompressionBombError) as exc:
+        return _fit_error({'ok':False,'error':str(exc),'partial_output_possible':True})
 
 
 @mcp.tool()
@@ -964,7 +1111,7 @@ def _fit_measurements(pattern_indices, targets, seam_pairs):
 
 def _fit_result(outcome, folder, observations, preview_count):
     outcome.update(observations=observations, observations_source='caller supplied; not sensor measurements',
-                   fit_certified=False, scope='images and 2D edge measurements; inspect 3D fit, wrinkles and collisions visually')
+                   fit_certified=False, scope='images, mesh bounds and 2D edge measurements; inspect 3D fit, wrinkles and collisions visually')
     images = []
     if outcome.get('ok'):
         folder.mkdir(parents=True, exist_ok=True)
@@ -986,7 +1133,7 @@ def _fit_error(outcome):
 @mcp.tool()
 def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: list[dict] | None = None,
                        seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
-                       preview_count: int = 4) -> CallToolResult:
+                       preview_count: int = 4, capture_mesh: bool = True) -> CallToolResult:
     """Return garment images, edge target comparisons, seam diagnostics and a saved fit report.
 
     Does not simulate. Observations are caller supplied; no automated body collision,
@@ -994,7 +1141,14 @@ def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: lis
     """
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
-        return _fit_result(_fit_measurements(pattern_indices, targets, seam_pairs), folder, observations, preview_count)
+        if type(capture_mesh) is not bool:
+            raise ValueError('capture_mesh must be boolean')
+        outcome = _fit_measurements(pattern_indices, targets, seam_pairs)
+        if capture_mesh and outcome.get('ok'):
+            mesh = capture_mesh_snapshot(str(folder/'mesh'/'garment.obj'))
+            outcome['mesh'] = mesh
+            outcome['ok'] = mesh.get('ok',False)
+        return _fit_result(outcome, folder, observations, preview_count)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return _fit_error({'ok': False, 'error': str(exc)})
 
@@ -1012,7 +1166,8 @@ def _save_manifest(outcome, path):
 def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_steps: int = 1,
                      quality: int = 2, simulation_mode: int = 0, targets: list[dict] | None = None,
                      seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
-                     preview_count: int = 4, timeout: float = 300.0) -> CallToolResult:
+                     preview_count: int = 4, timeout: float = 300.0,
+                     capture_mesh: bool = True) -> CallToolResult:
     """Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report.
 
     steps is the native Simulate(int) argument, limited to 1–200. Quality 0 normal,
@@ -1025,6 +1180,11 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
         preflight = _fit_measurements(pattern_indices, targets, seam_pairs)
         if not preflight['ok']:
             return _fit_error(preflight)
+        if type(capture_mesh) is not bool:
+            raise ValueError('capture_mesh must be boolean')
+        before_mesh = capture_mesh_snapshot(str(folder/'mesh-before'/'garment.obj')) if capture_mesh else None
+        if before_mesh is not None and not before_mesh.get('ok'):
+            return _fit_error(before_mesh)
         outcome = _md_operation('prepare_fitting_pass', timeout=timeout, checkpoint_path=str(folder/'before.zprj'),
                                 simulation_steps=simulation_steps, quality=quality, simulation_mode=simulation_mode)
         if outcome.get('checkpoint'):
@@ -1033,6 +1193,12 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                 outcome['ok'] = False
         if outcome.get('ok'):
             outcome.update(_fit_measurements(pattern_indices, targets, seam_pairs))
+            if capture_mesh:
+                after_mesh = capture_mesh_snapshot(str(folder/'mesh-after'/'garment.obj'))
+                outcome['mesh_before'],outcome['mesh_after']=before_mesh,after_mesh
+                outcome['ok'] = outcome.get('ok',False) and after_mesh.get('ok',False)
+                if after_mesh.get('ok'):
+                    outcome['mesh_comparison']=geometry.compare_meshes(before_mesh['metrics']['path'],after_mesh['metrics']['path'])
         return _fit_result(outcome, folder, observations, preview_count)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         outcome.update(ok=False, error=str(exc))

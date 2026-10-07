@@ -63,6 +63,13 @@ installed coordinate convention differs. This is a starting block, without
 darts, waistband, closures, seam allowances or automatic avatar arrangement.
 It is not a finished fitted skirt.
 
+Since v0.6, `build_skirt_recipe` defaults to `vertical_direction="down"`, which
+extends length toward negative Y as observed in the MD 2026 live trial. Use
+`vertical_direction="up"` to reproduce the earlier positive-Y draft. Saved
+recipes already contain coordinates and are not silently rewritten. New
+`build_bodice_block` and `build_sleeve_block` return inspectable curved draft
+templates; see [the v0.6 guide](live-test-improvements.md).
+
 The version-1 JSON schema is data-only: a name, pieces with unique ids and polygon
 points, explicit boundary seam pairs/directions, optional fabric path/mode,
 export settings and preview count. Measurement metadata is retained. Points

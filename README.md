@@ -109,7 +109,7 @@ tools to work.
 
 <!-- TOOLS:START -->
 
-**Total: 67 MCP tools (v0.5.0).**
+**Total: 75 MCP tools (v0.6.0).**
 
 Every registered tool is listed individually below. Required inputs are shown;
 the MCP schema supplies optional settings and defaults.
@@ -120,17 +120,24 @@ the MCP schema supplies optional settings and defaults.
 | `apply_fit_adjustments` | `registry_path`, `adjustments`, `checkpoint_path` | Checkpoint and apply explicit bounded move_2d, layer or resolution corrections to named pieces. |
 | `apply_garment_recipe` | `recipe` | Review or apply an explicit garment recipe. Dry-run is the default. |
 | `arrange_patterns` | `pattern_indices`, `arrangement_index` | Assign patterns to an installed avatar arrangement point and read the resulting properties. |
+| `arrange_patterns_by_name` | `pattern_indices`, `arrangement_name`, `output_dir` | Resolve an exact discovered avatar arrangement name and apply it with mesh evidence. |
+| `arrange_patterns_verified` | `pattern_indices`, `arrangement_index`, `output_dir` | Checkpoint/apply arrangement and compare actual exported garment meshes before and after. |
 | `assign_fabric` | `fabric_index`, `pattern_index` | Assign fabric with colorway mode 1=current, 2=all unlinked, 3=all linked. |
 | `assign_fabric_batch` | `fabric_index`, `pattern_indices` | Assign one fabric to multiple pieces with preflight bounds checks. |
 | `batch_garment_workflows` | `jobs`, `output_dir` | Process 1–50 .zprj projects independently with checkpoints and a JSON report. |
 | `bind_pattern_reference` | `registry_path`, `ref_id`, `pattern_index`, `edge_names` | Persist a piece reference and named boundary edges using name plus geometry signature. |
+| `build_bodice_block` | `bust_cm`, `length_cm`, `shoulder_width_cm`, `neck_width_cm`, `armhole_depth_cm` | Draft local front/back bodice spline templates with explicit cm scale and Y direction. |
 | `build_skirt_recipe` | `waist_cm`, `length_cm`, `hem_cm` | Build a data-only two-panel skirt block with matching side seams. |
+| `build_sleeve_block` | `bicep_cm`, `cuff_cm`, `length_cm`, `cap_height_cm` | Draft a local spline sleeve template; cap-to-armhole matching and fit remain explicit. |
 | `capture_fit_report` | `output_dir`, `pattern_indices` | Return garment images, edge target comparisons, seam diagnostics and a saved fit report. |
+| `capture_mesh_snapshot` | `path` | Export the visible garment OBJ and record bounds, centroid, counts and geometry digests. |
 | `clone_pattern_layer` | `pattern_index`, `name` | Create an over/under layer clone for lining and verify the added piece. |
+| `compare_mesh_snapshots` | `before_path`, `after_path` | Compare two local OBJ exports for mesh movement; no MD calls or fit certification. |
 | `configure_animation` | `start_frame`, `end_frame` | Set an animation frame range with read-back checks. Does not simulate. |
 | `copy_pattern` | `pattern_index`, `name` | Copy a pattern with a 2D offset and verify the added piece's index/name. |
 | `create_curved_pattern` | `vertices`, `name` | Create a named native pattern with [x,y,type] vertices: 0 straight, 2 spline, 3 Bezier. |
 | `create_fabric_from_textures` | `path`, `base_texture` | Create a .zfab preset from existing texture maps, verifying the output file. |
+| `create_fit_closeups` | `report_path`, `output_dir`, `regions` | Crop caller-selected regions from saved fitting images into labeled MCP close-up images. |
 | `create_internal_shape` | `pattern_index`, `vertices` | Create an internal line or closed construction shape using [x,y,type] vertices. |
 | `create_pattern` | `points`, `name` | Create a named straight-edge polygon from [x,y] points in MD native units. |
 | `create_rectangle` | `width`, `height`, `name` | Create a rectangle in MD native units; boundary starts at the origin. |
@@ -148,9 +155,10 @@ the MCP schema supplies optional settings and defaults.
 | `get_operation_history` | — | Read recent registered MD operation statuses/IDs/digests for this server process (up to 100). |
 | `get_pattern_layer` | `pattern_index` | Read a pattern's simulation layer. |
 | `import_fabric` | `path` | Import an existing absolute .zfab/.jfab path; verify its index and name. |
-| `import_pattern_json` | `path`, `checkpoint_path` | Checkpoint then import edited MD-native pattern JSON; refresh indices and references. |
+| `import_pattern_json` | `path`, `checkpoint_path` | Checkpoint/import native JSON and restore known resolution, layer, solidify and fabric assignments. |
 | `import_project` | `path` | Open an MD project / garment / mesh file (.zprj, .zpac, .obj, .fbx, ...) by absolute path. |
 | `inspect_arrangement` | `pattern_index` | Read a pattern's native avatar arrangement properties. |
+| `inspect_native_pattern_geometry` | `pattern_index`, `export_path` | Export native geometry/control points/IDs alongside the actual API boundary edge map. |
 | `inspect_pattern` | `pattern_index` | Inspect a pattern's name, fabric, mesh resolution, points and boundary edges. |
 | `list_arrangements` | — | List installed avatar arrangement points with their native properties. |
 | `list_fabrics` | — | List fabrics in the current scene: index and name (plus the fabric-style name list). |
@@ -188,7 +196,7 @@ the MCP schema supplies optional settings and defaults.
 
 Anything not covered by a wrapper: use `execute_python` directly.
 
-Version 0.5 exposes 67 tools. See [garment/export contracts](docs/features.md) and
+Version 0.6 exposes 75 tools. See [live-test gap fixes](docs/live-test-improvements.md), [garment/export contracts](docs/features.md) and
 [recipe, animation and batch examples](docs/recipes.md), and
 [complex garment controls](docs/complex-design.md) for checkpoint guidance
 and validation limits. Restart the MCP client
@@ -214,8 +222,13 @@ Marvelous Designer installation. `uv sync` installs the SDK and Pillow needed
 for the integration tests. Plain Python without the SDK skips those tests.
 The tool catalog is generated from FastMCP schemas; after adding tools, run
 `uv run python scripts/update_tool_catalog.py` to update every row and the total.
-New v0.5 controls have contract tests; live MD validation remains pending because
-the listener was offline. See [complex garment controls](docs/complex-design.md).
+The v0.5 live session exercised 42/67 tools, including all 25 new v0.5 names,
+and produced a simulated skirt and sleeveless pocket top. It found placement,
+coordinate and JSON settings gaps. Version 0.6 addresses those findings in code;
+**no tests or live MD calls were run for v0.6, at the user's request**.
+See [the implementation and remaining limits](docs/live-test-improvements.md).
+Generate the catalog without importing the server using
+`python scripts/update_tool_catalog.py --static` when execution is intentionally deferred.
 
 ## Why does MD freeze while the listener runs?
 

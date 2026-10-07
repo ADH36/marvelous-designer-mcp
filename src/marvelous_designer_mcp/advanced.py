@@ -8,7 +8,7 @@ import os
 if globals().get('__package__') == 'marvelous_designer_mcp':
     from .operations import (_function, _integer, _number, _path, _prepare_file, _verify_files,
                              _pattern_indices, _lines, rename_pattern, save_checkpoint,
-                             set_pattern_resolution, sew_edges, _OPERATIONS, _batch_load_option)
+                             set_pattern_resolution, sew_edges, assign_fabric_batch, _OPERATIONS, _batch_load_option)
     from .recipes import recipe_number, recipe_polygon, recipe_keys
 
 
@@ -154,7 +154,7 @@ def export_pattern_json(path,overwrite=False):
     return result
 
 
-def import_pattern_json(path,checkpoint_path):
+def import_pattern_json(path,checkpoint_path,preserve_settings=True):
     path=_path(path,'.json',must_exist=True)
     if os.path.getsize(path)>10*1024*1024:
         raise ValueError('Native pattern JSON exceeds 10 MiB')
@@ -175,14 +175,90 @@ def import_pattern_json(path,checkpoint_path):
         raise ValueError('Supply an MD-native export, not a recipe or executable code')
     fn=_function('pattern_api','ImportPatternJSON')
     _function('pattern_api','GetPatternCount')
+    if type(preserve_settings) is not bool:
+        raise ValueError('preserve_settings must be boolean')
+    settings = _capture_import_settings(document) if preserve_settings else []
+    settings_path=_path(checkpoint_path,'.zprj')+'.settings.json'
+    if preserve_settings and os.path.exists(settings_path):
+        raise ValueError('Settings recovery file already exists; choose a fresh checkpoint path')
     checkpoint=save_checkpoint(checkpoint_path)
     try:
+        if preserve_settings:
+            with open(settings_path,'x',encoding='utf-8') as file:
+                json.dump({'settings':settings,'scope':'known properties only'},file,indent=2)
         success=bool(fn(path))
+        if not success:
+            raise RuntimeError('MD rejected native JSON import; scene may have changed')
+        restored = _restore_import_settings(settings) if preserve_settings else []
         return {'ok':success,'checkpoint':checkpoint,'pattern_count':_function('pattern_api','GetPatternCount')(),
                 'partial_change_possible':not success,
-                'refresh_indices':True,'verification':'MD import status; inspect geometry and rebind references'}
+                'refresh_indices':True,'restored_settings':restored,'preserve_settings':preserve_settings,
+                'settings_recovery_path':settings_path if preserve_settings else None,
+                'full_state_preserved':False,
+                'unverified_state':['physical fabric parameters','colorways','freeze','strengthen','simulation cache'],
+                'verification':'known settings reapplied/read back by unique names; inspect geometry and rebind references'}
     except Exception as exc:
-        return {'ok':False,'error':str(exc),'checkpoint':checkpoint,'partial_change_possible':True}
+        return {'ok':False,'error':str(exc),'checkpoint':checkpoint,'partial_change_possible':True,
+                'settings_recovery_path':settings_path if preserve_settings else None}
+
+
+def _capture_import_settings(document):
+    # Native IDs are observable, but their persistence is not established. Require
+    # an exact set of unique names rather than guessing index correspondence.
+    count=_function('pattern_api','GetPatternCount')()
+    name=_function('pattern_api','GetPatternPieceName')
+    names=[name(i) for i in range(count)]
+    pieces=document.get('PatternList') if isinstance(document,dict) else None
+    if not isinstance(pieces,list) or any(not isinstance(p,dict) for p in pieces):
+        raise ValueError('Settings preservation requires an MD PatternList export')
+    incoming=[p.get('Name') for p in pieces]
+    if (any(not isinstance(n,str) or not n for n in names+incoming)
+            or len(set(names))!=len(names) or len(set(incoming))!=len(incoming)
+            or set(names)!=set(incoming)):
+        raise ValueError('Settings preservation requires exactly the current unique pattern names; use preserve_settings=False for replacement')
+    fabric_name=_function('fabric_api','GetFabricName')
+    states=[]
+    for i,n in enumerate(names):
+        mesh=_function('pattern_api','GetMeshCountByType')(i)
+        mesh_type=mesh.get('Mesh Type')
+        if mesh_type not in ('Triangle','Quad'):
+            raise ValueError('Unrecognized mesh type; settings cannot be preserved safely')
+        states.append({'name':n,'particle_distance':_function('pattern_api','GetParticleDistanceOfPattern')(i),
+                       'mesh_type':mesh_type,'layer':_function('pattern_api','GetPatternLayer')(i),
+                       'solidify':bool(_function('pattern_api','IsPatternPieceSolidify')(i)),
+                       'fabric_name':fabric_name(_function('pattern_api','GetPatternPieceFabricIndex')(i))})
+    for fn in ('SetParticleDistanceOfPattern','SetMeshType','SetPatternLayer','SetPatternPieceSolidify'):
+        _function('pattern_api',fn)
+    _function('fabric_api','GetFabricCount')
+    _function('fabric_api','AssignFabricToPattern')
+    return states
+
+
+def _restore_import_settings(states):
+    from collections import defaultdict
+    patterns, fabrics=defaultdict(list),defaultdict(list)
+    for i in range(_function('pattern_api','GetPatternCount')()):
+        patterns[_function('pattern_api','GetPatternPieceName')(i)].append(i)
+    for i in range(_function('fabric_api','GetFabricCount')(False)):
+        fabrics[_function('fabric_api','GetFabricName')(i)].append(i)
+    planned=[]
+    if len(states)!=sum(len(v) for v in patterns.values()):
+        raise RuntimeError('Imported pattern count changed; use the checkpoint to recover')
+    for state in states:
+        if len(patterns[state['name']])!=1 or len(fabrics[state['fabric_name']])!=1:
+            raise RuntimeError('Pattern/fabric name mapping became missing or ambiguous; recover the checkpoint')
+        planned.append((state,patterns[state['name']][0],fabrics[state['fabric_name']][0]))
+    completed=[]
+    for state,index,fabric_index in planned:
+        actions=(lambda:set_pattern_resolution([index],state['particle_distance'],state['mesh_type']),
+                 lambda:set_pattern_layers([index],state['layer']),
+                 lambda:set_pattern_constraints([index],solidify=state['solidify']),
+                 lambda:assign_fabric_batch(fabric_index,[index],assignment_mode=1))
+        for action in actions:
+            if not action().get('ok'):
+                raise RuntimeError('Imported settings read-back failed; recover the checkpoint')
+        completed.append({'index':index,**state,'fabric_index':fabric_index,'readback_verified':True})
+    return completed
 
 
 def list_arrangements():
@@ -198,7 +274,7 @@ def inspect_arrangement(pattern_index):
             'properties':dict(_function('pattern_api','GetArrangementOfPattern')(pattern_index))}
 
 
-def arrange_patterns(pattern_indices,arrangement_index,shape_style='Flat',orientation=None,position=None):
+def _arrangement_inputs(pattern_indices,arrangement_index,shape_style,orientation,position):
     _pattern_indices(pattern_indices)
     arrangements=list_arrangements()['arrangements']
     _integer(arrangement_index,'arrangement_index',maximum=len(arrangements)-1)
@@ -213,6 +289,12 @@ def arrange_patterns(pattern_indices,arrangement_index,shape_style='Flat',orient
     pos_fn=_function('pattern_api','SetArrangementPosition') if position is not None else None
     if position is not None and (not isinstance(position,list) or len(position)!=3 or any(type(v) is not int for v in position)):
         raise ValueError('Arrangement position must be three integer API codes/offsets')
+    return arrangements,set_arr,set_shape,orient_fn,pos_fn
+
+
+def arrange_patterns(pattern_indices,arrangement_index,shape_style='Flat',orientation=None,position=None):
+    arrangements,set_arr,set_shape,orient_fn,pos_fn=_arrangement_inputs(
+        pattern_indices,arrangement_index,shape_style,orientation,position)
     completed=[]
     for index in pattern_indices:
         try:
@@ -226,7 +308,8 @@ def arrange_patterns(pattern_indices,arrangement_index,shape_style='Flat',orient
         except Exception as exc:
             return {'ok':False,'error':str(exc),'completed':completed,'failed_index':index,'partial_change_possible':True}
     return {'ok':True,'completed':completed,'requested_arrangement':arrangements[arrangement_index],
-            'verification':'setters completed and properties read; collision/placement needs visual inspection'}
+            'placement_verified':False,'movement_verified':False,
+            'verification':'property read-back only; use arrange_patterns_verified for actual mesh movement evidence'}
 
 
 def get_pattern_layer(pattern_index):

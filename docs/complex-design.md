@@ -5,8 +5,10 @@ construction, arrangement and inspection cycle for a garment controlled through
 Codex or Hermes. They do not turn measurements into a finished, autonomously
 fitted garment. New signatures come from the [official MD API list](https://developer.marvelousdesigner.com/list.html)
 and [API options](https://developer.marvelousdesigner.com/optiontype.html).
-The installed MD listener was offline during development: new controls have
-stateful API-contract and generated MCP-script tests, **not live MD validation**.
+The subsequent MD 2026.0.315 live session exercised all 25 new v0.5 tool names
+and built two basic garments; not every parameter branch or complex workflow
+was covered. The report led to [v0.6 implementation changes](live-test-improvements.md).
+Those changes are **untested**, at the user's request.
 Check installed signatures with `md_api` and trial on a checkpointed disposable
 project before using them on production garments.
 
@@ -35,6 +37,10 @@ a checkpoint first. Native JSON is separate from version-1 garment recipe JSON.
 Do not invent the native schema: export and inspect it on the installed version.
 After import, inspect geometry and sewing, refresh indices, and explicitly rebind
 references. Round-trip import does not promise preservation of all seam mappings.
+Version 0.6 defaults to restoring known resolution, layer, solidify and fabric
+assignment through unique names. Replacement imports need the explicit
+`preserve_settings=False` opt-out; full physical state still requires a project
+checkpoint. See [the v0.6 guide](live-test-improvements.md).
 
 ## Avatar placement, lining and constraints
 
@@ -44,6 +50,9 @@ Optional orientation and `[x,y,offset]` values are native integer API settings;
 their interpretation must be checked against the installed version. No named
 orientation codes or automatic front/back matching are guessed. Setter completion
 plus property read-back does not verify collision-free placement.
+Use v0.6 `arrange_patterns_verified` or `arrange_patterns_by_name` to capture
+checkpointed before/after mesh movement evidence. Unchanged geometry is reported
+explicitly; successful property setters alone never certify placement.
 
 `get_pattern_layer` and `set_pattern_layers` expose simulation layers from 0 to
 20 with read-back verification. `clone_pattern_layer` performs the native under
@@ -91,6 +100,8 @@ optional targets and explicit seam pairs, optional caller observations, and
 1–8 previews. It returns actual MCP image content and writes `fit-report.json`.
 No simulation occurs. Caller observations are labeled as such. The report always
 sets `fit_certified=false`; Codex must inspect the images before proposing edits.
+Version 0.6 also exports mesh metrics by default and supports caller-selected
+close-ups from saved images through `create_fit_closeups`.
 
 `run_fitting_pass` preflights measurements/seam inputs, saves `before.zprj` and
 its manifest, selects simulation quality/mode with read-back, runs **one** pass,

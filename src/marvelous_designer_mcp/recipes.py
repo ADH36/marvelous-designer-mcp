@@ -116,7 +116,7 @@ def validate_recipe(recipe):
     return normalized
 
 
-def skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm=2.0, native_units_per_cm=10.0):
+def skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm=2.0, native_units_per_cm=10.0, vertical_direction='down'):
     waist = recipe_number(waist_cm, 'waist_cm', True)
     length = recipe_number(length_cm, 'length_cm', True)
     hem = recipe_number(hem_cm, 'hem_cm', True)
@@ -125,7 +125,10 @@ def skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm=2.0, native_units_per_cm=1
         raise ValueError('Ease must be nonnegative; hem must be at least waist plus ease')
     scale = recipe_number(native_units_per_cm, 'native_units_per_cm', True)
     top, bottom, height = (waist+ease)/2*scale, hem/2*scale, length*scale
-    # Clockwise boundary: waist, right side, hem, left side. Two matching panels.
+    if vertical_direction not in ('down','up'):
+        raise ValueError('vertical_direction must be down (negative Y) or up (positive Y)')
+    height *= -1 if vertical_direction=='down' else 1
+    # Boundary: waist, right side, hem, left side. MD 2026 live trial used negative Y downward.
     points = [[-top/2, 0], [top/2, 0], [bottom/2, height], [-bottom/2, height]]
     back = [[x + bottom + 100, y] for x, y in points]
     return validate_recipe({'schema_version': 1, 'name': 'Two-panel skirt block',
@@ -135,3 +138,49 @@ def skirt_recipe(waist_cm, length_cm, hem_cm, ease_cm=2.0, native_units_per_cm=1
                    {'id': 'back', 'name': 'Skirt Back', 'points': back}],
         'seams': [{'piece_a': 'front', 'line_a': 1, 'piece_b': 'back', 'line_b': 3, 'direction_a': True, 'direction_b': False},
                   {'piece_a': 'front', 'line_a': 3, 'piece_b': 'back', 'line_b': 1, 'direction_a': True, 'direction_b': False}]})
+
+
+def garment_block(kind, measurements, native_units_per_cm=10.0, vertical_direction='down'):
+    """Local draft geometry only; inspect native edge maps before constructing seams."""
+    scale=recipe_number(native_units_per_cm,'native_units_per_cm',True)
+    if vertical_direction not in ('down','up'):
+        raise ValueError('vertical_direction must be down or up')
+    sign=-1 if vertical_direction=='down' else 1
+    values={key:recipe_number(value,key,key!='ease_cm')*scale for key,value in measurements.items()}
+    if values['ease_cm']<0:
+        raise ValueError('ease_cm must be nonnegative')
+    def vertices(points):
+        return [[x,sign*y,kind] for x,y,kind in points]
+    if kind=='bodice':
+        width=values['bust_cm']/4+values['ease_cm']/4
+        length,shoulder,neck,arm=values['length_cm'],values['shoulder_width_cm']/2,values['neck_width_cm']/2,values['armhole_depth_cm']
+        if not neck<shoulder<width or arm>=length or values['front_neck_depth_cm']>=arm or values['back_neck_depth_cm']>=arm:
+            raise ValueError('Require neck < shoulder < panel width, and neck depth < armhole depth < length')
+        pieces=[]
+        shoulder_drop=min(scale*2,arm/4)
+        for side in ('front','back'):
+            depth=values[side+'_neck_depth_cm']
+            points=[(-neck,0,0),(0,depth,2),(neck,0,0),(shoulder,shoulder_drop,0),
+                    (shoulder,arm/2,2),(width,arm,0),(width,length,0),
+                    (-width,length,0),(-width,arm,0),(-shoulder,arm/2,2),(-shoulder,shoulder_drop,0)]
+            pieces.append({'id':side,'name':'Bodice '+side.title(),'vertices':vertices(points)})
+    elif kind=='sleeve':
+        width=values['bicep_cm']+values['ease_cm']
+        cuff=values['cuff_cm']
+        length,cap=values['length_cm'],values['cap_height_cm']
+        if cap>=length or cuff>width:
+            raise ValueError('Cap height must be less than length; cuff must not exceed eased bicep')
+        points=[(-width/2,cap,0),(-width/3,cap/3,2),(0,0,0),
+                (width/3,cap/3,2),(width/2,cap,0),(cuff/2,length,0),(-cuff/2,length,0)]
+        pieces=[{'id':'sleeve','name':'Sleeve Block','vertices':vertices(points)}]
+    else:
+        raise ValueError('Unknown garment block')
+    for piece in pieces:
+        recipe_polygon([point[:2] for point in piece['vertices']])
+    return {'ok':True,'block':{'kind':kind,'measurements_cm':measurements,'native_units_per_cm':scale,
+            'vertical_direction':vertical_direction,'downward_y_sign':sign,'pieces':pieces},
+            'workflow':['create_curved_pattern for each piece','inspect_native_pattern_geometry',
+                        'bind actual edge indices','diagnose seam lengths','checkpoint then sew',
+                        'discover avatar arrangement points','arrange_patterns_by_name','run_fitting_pass'],
+            'fit_certified':False,'sleeve_cap_matched':False,
+            'scope':'draft templates, not a fitted sloper or garment recipe; no inferred sewing indices, darts, closures or seam allowance'}
