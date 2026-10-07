@@ -52,6 +52,9 @@ def _handle_execute_python(params: dict) -> dict:
     result = None
     error = None
     try:
+        # Don't accidentally return the previous call's result when this code
+        # doesn't assign one.
+        _persistent_globals.pop("result", None)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             exec(code, _persistent_globals)
         result = _persistent_globals.get("result")
@@ -114,8 +117,25 @@ def _serve_conn(conn: socket.socket) -> bool:
             conn.sendall((json.dumps({"id": None, "error": f"bad json: {e}"}) + "\n").encode())
             return True
 
+        if not isinstance(req, dict):
+            conn.sendall((json.dumps({"id": None, "error": "request must be a JSON object"}) + "\n").encode())
+            return True
+
         req_id = req.get("id")
         method = req.get("method")
+        params = req.get("params", {})
+        if not isinstance(req_id, str) or not req_id:
+            conn.sendall((json.dumps({"id": None, "error": "request id must be a non-empty string"}) + "\n").encode())
+            return True
+        if not isinstance(method, str) or not method:
+            conn.sendall((json.dumps({"id": req_id, "error": "request method must be a non-empty string"}) + "\n").encode())
+            return True
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            conn.sendall((json.dumps({"id": req_id, "error": "request params must be a JSON object"}) + "\n").encode())
+            return True
+
         if method == "shutdown":
             conn.sendall((json.dumps({"id": req_id, "result": {"bye": True}}) + "\n").encode())
             return False
@@ -125,7 +145,7 @@ def _serve_conn(conn: socket.socket) -> bool:
             resp = {"id": req_id, "error": f"unknown method: {method}"}
         else:
             try:
-                resp = {"id": req_id, "result": handler(req.get("params") or {})}
+                resp = {"id": req_id, "result": handler(params)}
             except Exception:
                 resp = {"id": req_id, "error": traceback.format_exc()}
         conn.sendall((json.dumps(resp) + "\n").encode("utf-8"))

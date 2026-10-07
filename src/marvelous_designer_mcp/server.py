@@ -21,6 +21,8 @@ def _md_exec(code: str) -> dict:
     out: dict = {"ok": False, "error": resp["error"]} if resp.get("error") else {"ok": True, "result": resp.get("result")}
     if resp.get("stdout"):
         out["stdout"] = resp["stdout"]
+    if resp.get("stderr"):
+        out["stderr"] = resp["stderr"]
     return out
 
 

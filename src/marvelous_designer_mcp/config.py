@@ -6,3 +6,6 @@ MD_PORT = int(os.environ.get("MD_MCP_PORT", "7421"))
 # .zprj, simulation, rendering) can take much longer. Raise MD_MCP_TIMEOUT for
 # very long renders. The MD GUI is frozen for the whole call regardless.
 MD_TIMEOUT = float(os.environ.get("MD_MCP_TIMEOUT", "120.0"))
+MD_MAX_RESPONSE_BYTES = int(os.environ.get("MD_MCP_MAX_RESPONSE_BYTES", str(16 * 1024 * 1024)))
+if MD_MAX_RESPONSE_BYTES < 1:
+    raise ValueError("MD_MCP_MAX_RESPONSE_BYTES must be a positive integer")

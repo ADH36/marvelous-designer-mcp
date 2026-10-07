@@ -123,6 +123,19 @@ tools to work.
 
 Anything not covered by a wrapper: use `execute_python` directly.
 
+## Development
+
+Run the protocol tests from the repository root with:
+
+```powershell
+$env:PYTHONPATH = "src;md_addon"
+python -m unittest discover -s tests -v
+```
+
+These tests exercise the TCP framing and request validation without requiring a
+Marvelous Designer installation. GitHub Actions runs them on Windows across
+Python 3.10–3.13.
+
 ## Why does MD freeze while the listener runs?
 
 MD's embedded Python (3.11) doesn't give CPU to background threads — a daemon
@@ -164,9 +177,12 @@ for CLO 3D and for the day MD adds a `.dll` loader; see `cpp_plugin/README.md`.
 | `MD_MCP_HOST` | `127.0.0.1` | listener host the bridge connects to |
 | `MD_MCP_PORT` | `7421` | listener port |
 | `MD_MCP_TIMEOUT` | `120.0` | bridge socket timeout, seconds |
+| `MD_MCP_MAX_RESPONSE_BYTES` | `16777216` | maximum listener response line size |
 
 The listener-side request read timeout and 1 MiB request limit are defined in
-+`md_addon/md_listener.py` (`REQUEST_READ_TIMEOUT` and `MAX_REQUEST_BYTES`).
+`md_addon/md_listener.py` (`REQUEST_READ_TIMEOUT` and `MAX_REQUEST_BYTES`).
+Listener responses are limited to 16 MiB by default. Raise
+`MD_MCP_MAX_RESPONSE_BYTES` if a workflow returns larger values.
 
 (The listener side's host/port are constants in `md_addon/md_listener.py` — keep
 them in sync if you change the defaults.)
