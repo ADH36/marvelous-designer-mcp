@@ -119,9 +119,28 @@ tools to work.
 | `import_project(path)` | Open a `.zprj` / `.zpac` / `.obj` / `.fbx` / ... by absolute path (`import_api.ImportFile`). |
 | `export_project(path)` | Save the scene as a `.zprj` (`export_api.ExportZPrjW`). |
 | `simulate(steps=1)` | `utility_api.Simulate(int)`. |
-| `md_api(module, contains="")` | List a module's functions; substring-filtered. Discover signatures by calling a function with wrong args and reading the `TypeError`. |
+| `md_api(module, contains="")` | List public module attributes; substring-filtered. Inspect a callable's `__doc__` before using it. |
+| `preview_garment(output_dir, ...)` | Return turntable PNG images directly as MCP image content. |
+| `export_turntable_images(path, ...)` | Write evenly spaced garment previews with verified output files. |
+| `export_custom_views(output_dir, ...)` | Export existing saved custom views without the standard snapshot dialog. |
+| `export_obj(path, ...)` | Export garment OBJ with explicit scale, mesh, avatar and UV options. |
+| `inspect_pattern(pattern_index)` | Inspect boundary edges, points, fabric and mesh resolution. |
+| `rename_pattern(pattern_index, name)` | Rename a piece and verify its name. |
+| `mirror_pattern(pattern_index, with_sewing=False)` | Create a symmetric piece and return refreshed indices. |
+| `select_patterns(pattern_indices, ...)` | Select multiple pieces and verify selection. |
+| `set_pattern_resolution(pattern_indices, particle_distance, mesh_type)` | Batch-edit particle distance and Triangle/Quad mesh type with read-back checks. |
+| `list_seams()` | List sewing groups. |
+| `sew_edges(pattern_a, line_a, pattern_b, line_b, ...)` | Sew validated boundary edges with explicit directions. |
+| `assign_fabric_batch(fabric_index, pattern_indices, face=2)` | Batch-assign a fabric and report partial failures. |
+| `create_fabric_from_textures(path, base_texture, ...)` | Create a .zfab preset from existing texture maps. |
+| `save_checkpoint(path, ...)` | Save and verify a .zprj checkpoint. |
+| `garment_workflow(output_dir, ...)` | Checkpoint, optionally append avatar/garment assets, simulate, save, export mesh and previews. |
 
 Anything not covered by a wrapper: use `execute_python` directly.
+
+Version 0.3 adds 15 tools. See [feature usage and verified MD behavior](docs/features.md)
+for examples, checkpoint guidance and validation limits. Restart the MCP client
+connection after updating so Codex, Hermes or another client discovers the tools.
 
 ## Development
 
@@ -129,12 +148,13 @@ Run the protocol tests from the repository root with:
 
 ```powershell
 $env:PYTHONPATH = "src;md_addon"
-python -m unittest discover -s tests -v
+uv run python -m unittest discover -s tests -v
 ```
 
-These tests exercise the TCP framing and request validation without requiring a
-Marvelous Designer installation. GitHub Actions runs them on Windows across
-Python 3.10–3.13.
+These tests exercise TCP framing, API contracts, mutation preflight, partial
+failures, workflow ordering and actual MCP image content without requiring a
+Marvelous Designer installation. `uv sync` installs the SDK and Pillow needed
+for the integration tests. Plain Python without the SDK skips those tests.
 
 ## Why does MD freeze while the listener runs?
 

@@ -1,19 +1,27 @@
-from mcp.server.fastmcp import FastMCP
+import base64
+import json
+from pathlib import Path
+from typing import Literal
 
-from . import bridge
+from PIL import Image, ImageOps
+from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, ImageContent, TextContent
+
+from . import bridge, operations
 from .config import MD_HOST, MD_PORT
 
 mcp = FastMCP("marvelous-designer")
+_OPERATION_SOURCE = Path(operations.__file__).read_text(encoding="utf-8")
 
 
-def _md_exec(code: str) -> dict:
+def _md_exec(code: str, *, timeout: float | None = None) -> dict:
     """Run `code` inside MD via execute_python and flatten the listener's envelope.
 
     The listener returns {stdout, stderr, result, error}; this returns
     {"ok": True, "result": ...} or {"ok": False, "error": ...} (plus "stdout" if any).
     """
     try:
-        resp = bridge.call("execute_python", {"code": code})
+        resp = bridge.call("execute_python", {"code": code}, timeout=timeout)
     except bridge.BridgeError as e:
         return {"ok": False, "error": f"bridge: {e}"}
     if not isinstance(resp, dict):
@@ -24,6 +32,43 @@ def _md_exec(code: str) -> dict:
     if resp.get("stderr"):
         out["stderr"] = resp["stderr"]
     return out
+
+
+def _md_operation(operation: str, *, timeout: float | None = None, **params) -> dict:
+    try:
+        encoded = json.dumps(params, allow_nan=False, ensure_ascii=True)
+    except (ValueError, TypeError) as exc:
+        return {"ok": False, "error": str(exc)}
+    code = _OPERATION_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
+    response = _md_exec(code, timeout=timeout)
+    if response.get("ok") and isinstance(response.get("result"), dict):
+        outcome = response["result"]
+        for stream in ("stdout", "stderr"):
+            if response.get(stream):
+                outcome[stream] = response[stream]
+        return outcome
+    return response
+
+
+def _resize_turntable(outcome: dict, width: int, height: int) -> dict:
+    if outcome.get("ok"):
+        try:
+            render_sizes = []
+            for filename in outcome['files']:
+                with Image.open(filename) as image:
+                    if image.format != 'PNG':
+                        raise ValueError('MD returned a non-PNG turntable image')
+                    render_sizes.append(list(image.size))
+                    if image.size != (width, height):
+                        resized = ImageOps.pad(image.convert('RGBA'), (width, height),
+                                               method=Image.Resampling.LANCZOS, color=(0, 0, 0, 0))
+                        resized.save(filename, format='PNG')
+            outcome['render_sizes'] = render_sizes
+            outcome['output_size'] = [width, height]
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            outcome['ok'] = False
+            outcome['error'] = 'Preview image processing failed: ' + str(exc)
+    return outcome
 
 
 @mcp.tool()
@@ -41,9 +86,9 @@ def execute_python(code: str) -> dict:
 
     MD's API is exposed as importable modules (import_api, export_api, fabric_api,
     pattern_api, utility_api, ...), NOT as globals — so `import` what you need.
-    Bind the value you want back to a name called `result`. The API is pybind11-based,
-    so calling a function with wrong args raises a TypeError that lists the accepted
-    signatures — handy for discovery.
+    Bind the value you want back to a name called `result`. Inspect API function
+    __doc__ strings for signatures; wrong/no-argument probing can invoke valid
+    overloads and mutate the scene.
 
     Returns: {"stdout": str, "stderr": str, "result": any, "error": str|None}.
     """
@@ -153,8 +198,8 @@ def import_project(path: str) -> dict:
 def export_project(path: str) -> dict:
     """Save the current scene as a .zprj project file at the given absolute path.
 
-    Uses export_api.ExportZPrjW(path, False) (the bool is the MD second arg; False to
-    avoid any dialog), falling back to ExportZPrj(path). Returns the path string MD
+    Uses export_api.ExportZPrjW(path, False) (False disables thumbnail creation),
+    falling back to ExportZPrj(path). Returns the path string MD
     reports, or the raw signature error if the call shape was wrong.
     """
     code = (
@@ -203,8 +248,8 @@ def md_api(module: str, contains: str = "") -> dict:
     """List the functions of an MD API module (import_api, export_api, fabric_api, pattern_api,
     utility_api, ...). `contains` filters names by case-insensitive substring.
 
-    To learn a function's signature, call it via execute_python with wrong/no args — the
-    TypeError lists the accepted argument types.
+    To learn a function's signature, inspect its __doc__ via execute_python first.
+    Wrong/no-argument probing can invoke valid overloads, so don't probe setters.
     """
     code = (
         "import importlib\n"
@@ -216,3 +261,207 @@ def md_api(module: str, contains: str = "") -> dict:
         "result = sorted(names)\n"
     )
     return _md_exec(code)
+
+
+@mcp.tool()
+def inspect_pattern(pattern_index: int) -> dict:
+    """Inspect a pattern's name, fabric, mesh resolution, points and boundary edges.
+
+    Use the returned edge indices with sew_edges. Lengths are in MD API native
+    units. Geometry schema and index bounds are checked before sewing.
+    """
+    return _md_operation("inspect_pattern", pattern_index=pattern_index)
+
+
+@mcp.tool()
+def rename_pattern(pattern_index: int, name: str) -> dict:
+    """Rename a pattern piece and read its name back to verify the change."""
+    return _md_operation("rename_pattern", pattern_index=pattern_index, name=name)
+
+
+@mcp.tool()
+def mirror_pattern(pattern_index: int, with_sewing: bool = False) -> dict:
+    """Create a symmetric pattern, optionally including sewing.
+
+    Save a checkpoint first. Returns all pieces after the change; refresh indices
+    before further edits. This adds geometry to the current scene.
+    """
+    return _md_operation("mirror_pattern", pattern_index=pattern_index, with_sewing=with_sewing)
+
+
+@mcp.tool()
+def select_patterns(pattern_indices: list[int], keep_previous: bool = False) -> dict:
+    """Select multiple pattern pieces and return the verified selection."""
+    return _md_operation("select_patterns", pattern_indices=pattern_indices, keep_previous=keep_previous)
+
+
+@mcp.tool()
+def set_pattern_resolution(pattern_indices: list[int], particle_distance: float,
+                           mesh_type: Literal["Triangle", "Quad"] = "Triangle") -> dict:
+    """Set particle distance and mesh type for a batch of patterns, then read back.
+
+    Distance uses MD native units and must be at least 0.8. All indices are checked
+    before mutation. A partial failure reports completed pieces and failed_index;
+    inspect that piece before retrying. No automatic rollback occurs.
+    """
+    return _md_operation("set_pattern_resolution", pattern_indices=pattern_indices,
+                         particle_distance=particle_distance, mesh_type=mesh_type)
+
+
+@mcp.tool()
+def list_seams() -> dict:
+    """List the sewing groups in the current scene by index and name."""
+    return _md_operation("list_seams")
+
+
+@mcp.tool()
+def sew_edges(pattern_a: int, line_a: int, pattern_b: int, line_b: int,
+              direction_a: bool = True, direction_b: bool = False) -> dict:
+    """Sew two boundary edges. True means forward and False means backward.
+
+    Call inspect_pattern for valid edge indices and lengths. Save a checkpoint
+    before sewing. Directions are explicit; this does not guess seam orientation
+    or equalize edge lengths. Invalid endpoints are rejected before mutation.
+    """
+    return _md_operation("sew_edges", pattern_a=pattern_a, line_a=line_a,
+                         pattern_b=pattern_b, line_b=line_b,
+                         direction_a=direction_a, direction_b=direction_b)
+
+
+@mcp.tool()
+def assign_fabric_batch(fabric_index: int, pattern_indices: list[int], face: int = 2) -> dict:
+    """Assign one fabric to multiple pieces with preflight bounds checks.
+
+    face is the raw MD face code. Reports read-back pattern fabric indices and
+    completed pieces on failure; face-specific visual appearance is not verified.
+    """
+    return _md_operation("assign_fabric_batch", fabric_index=fabric_index,
+                         pattern_indices=pattern_indices, face=face)
+
+
+@mcp.tool()
+def create_fabric_from_textures(path: str, base_texture: str, normal_texture: str = "",
+                               displacement_texture: str = "", opacity_texture: str = "",
+                               roughness_texture: str = "", metalness_texture: str = "",
+                               overwrite: bool = False) -> dict:
+    """Create a .zfab preset from existing texture maps, verifying the output file.
+
+    Use absolute paths. Optional maps may be empty. This creates a preset file;
+    it does not assign or import the preset into the current scene.
+    """
+    return _md_operation("create_fabric_from_textures", path=path, base_texture=base_texture,
+                         normal_texture=normal_texture, displacement_texture=displacement_texture,
+                         opacity_texture=opacity_texture, roughness_texture=roughness_texture,
+                         metalness_texture=metalness_texture, overwrite=overwrite)
+
+
+@mcp.tool()
+def export_obj(path: str, scale: float = 1.0, thin: bool = True, single_object: bool = False,
+               include_avatar: bool = False, unified_uv: bool = True, overwrite: bool = False,
+               timeout: float = 120.0) -> dict:
+    """Export garment OBJ with explicit options to avoid an export dialog.
+
+    path must be an absolute .obj path in a dedicated empty output folder (unless
+    overwrite=True), because MD also writes material/texture files. Scale is an
+    explicit multiplier; coordinate axes retain MD's API defaults. Verify scale
+    with your DAZ/Unity/Blender destination. Returns verified output paths.
+    """
+    return _md_operation("export_obj", timeout=timeout, path=path, scale=scale,
+                         thin=thin, single_object=single_object, include_avatar=include_avatar,
+                         unified_uv=unified_uv, overwrite=overwrite)
+
+
+@mcp.tool()
+def export_turntable_images(path: str, image_count: int = 4, width: int = 1024, height: int = 1024,
+                            start_index: int = 0, overwrite: bool = False, timeout: float = 120.0) -> dict:
+    """Export 1–72 evenly spaced turntable images using an absolute PNG path prefix.
+
+    Uses the current scene/colorway and view settings. Verifies files were written.
+    Use preview_garment to return image content directly to the MCP client.
+    """
+    outcome = _md_operation("export_turntable_images", timeout=timeout, path=path,
+                            image_count=image_count, width=width, height=height,
+                            start_index=start_index, overwrite=overwrite)
+    return _resize_turntable(outcome, width, height)
+
+
+@mcp.tool()
+def export_custom_views(output_dir: str, width: int = 1024, height: int = 1024,
+                        prefix: str = "view", overwrite: bool = False, timeout: float = 120.0) -> dict:
+    """Export saved MD custom views into an absolute output directory.
+
+    Requires custom views already configured in MD. Empty output is reported as a
+    failure. Uses ExportCustomViewSnapshot, avoiding ExportSnapshot3D's dialog.
+    """
+    return _md_operation("export_custom_views", timeout=timeout, output_dir=output_dir,
+                         width=width, height=height, prefix=prefix, overwrite=overwrite)
+
+
+@mcp.tool()
+def preview_garment(output_dir: str, image_count: int = 4, width: int = 1024, height: int = 1024,
+                    prefix: str = "preview", overwrite: bool = False, timeout: float = 120.0) -> CallToolResult:
+    """Generate up to 8 turntable views and return PNG image content to the agent.
+
+    Use an absolute output directory and a new filename prefix. Dimensions are
+    limited to 2048 for MCP previews. Uses current camera/render settings.
+    Exported images remain on disk; unsupported/oversized images report an error.
+    """
+    if (type(image_count) is not int or not 1 <= image_count <= 8 or
+            type(width) is not int or type(height) is not int or
+            not 64 <= width <= 2048 or not 64 <= height <= 2048 or
+            not prefix or any(c in prefix for c in '/\\\x00') or prefix in (".", "..")):
+        outcome = {"ok": False, "error": "Preview requires 1–8 images, dimensions 64–2048, and a filename prefix"}
+    else:
+        outcome = export_turntable_images(str(Path(output_dir) / (prefix + ".png")), image_count,
+                                           width, height, 0, overwrite, timeout)
+    content = []
+    if outcome.get("ok"):
+        try:
+            if len(outcome["files"]) > 8:
+                raise ValueError("MD returned too many preview files")
+            for path in outcome["files"]:
+                file = Path(path)
+                if file.stat().st_size > 8 * 1024 * 1024:
+                    raise ValueError("Preview exceeds 8 MiB; use smaller dimensions: " + path)
+                data = file.read_bytes()
+                if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+                    raise ValueError("MD returned a non-PNG preview: " + path)
+                content.append(ImageContent(type="image", mimeType="image/png",
+                                            data=base64.b64encode(data).decode("ascii")))
+        except (OSError, ValueError) as exc:
+            outcome["ok"] = False
+            outcome["error"] = str(exc)
+            content = []
+    content.insert(0, TextContent(type="text", text=json.dumps(outcome, ensure_ascii=False)))
+    return CallToolResult(content=content, isError=not outcome.get("ok", False))
+
+
+@mcp.tool()
+def save_checkpoint(path: str, overwrite: bool = False, timeout: float = 120.0) -> dict:
+    """Save a .zprj checkpoint without a thumbnail dialog and verify the file."""
+    return _md_operation("save_checkpoint", timeout=timeout, path=path, overwrite=overwrite)
+
+
+@mcp.tool()
+def garment_workflow(output_dir: str, avatar_path: str = "", garment_path: str = "",
+                     simulation_steps: int = 0, preview_count: int = 4, scale: float = 1.0,
+                     overwrite: bool = False, timeout: float = 300.0) -> dict:
+    """Checkpoint, optionally append .avt/.zpac assets, simulate, save, export OBJ and previews.
+
+    Requires an empty absolute output directory unless overwrite=True. Assets are
+    appended using explicit import options. A checkpoint precedes mutations.
+    simulation_steps is passed directly to MD's Simulate(int); 0 skips simulation.
+    Stops on first failure and reports completed stages. Mutations are not rolled
+    back. A timeout leaves completion uncertain: inspect state before retrying.
+    """
+    outcome = _md_operation("garment_workflow", timeout=timeout, output_dir=output_dir,
+                            avatar_path=avatar_path, garment_path=garment_path,
+                            simulation_steps=simulation_steps, preview_count=preview_count,
+                            scale=scale, overwrite=overwrite)
+    for stage in outcome.get('stages', []):
+        if stage['stage'] == 'previews' and stage.get('ok'):
+            _resize_turntable(stage, 1024, 1024)
+            if not stage['ok']:
+                outcome['ok'] = False
+                outcome['error'] = stage['error']
+    return outcome

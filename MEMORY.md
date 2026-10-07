@@ -4,7 +4,7 @@ A snapshot of what this repo is, what works, and what's been ruled out — so a
 future session (you, or a different person, or a future Claude) can pick up
 without re-discovering everything.
 
-Last update: 2026-05-12, tag `v0.2.0`.
+Last update: 2026-10-07, package `v0.3.0` (upstream baseline `v0.2.0`).
 
 ---
 
@@ -30,10 +30,26 @@ LLM ──MCP/stdio──▶ src/marvelous_designer_mcp (FastMCP)
 |---|---|
 | Python listener (v0.1.0) | **Works.** Blocking main-thread server. MD's GUI freezes while running; `shutdown_listener` releases it. |
 | Plug-in auto-registration (`scripts/install_md_plugin.py`, v0.2.0) | **Works.** Idempotently writes MD's `pluginSettings.json` so the launcher appears under `Plugins ▸ Plug-in`. |
-| MCP tool wrappers | 10 typed tools (`scene_info`, `list_patterns`, `list_fabrics`, `assign_fabric`, `import_project`, `export_project`, `simulate`, `md_api`, plus `ping`, `shutdown_listener`) + `execute_python` for arbitrary code. All verified live against `HarukoMD2.zprj` (7 patterns, 2 fabrics, Alembic avatar). |
+| MCP tool wrappers | 26 tools: the original 11 plus previews, OBJ export, pattern inspection/editing, sewing, fabric batches/presets, verified checkpoints and staged workflows. See `docs/features.md` for contracts and which operations were tested live. |
 | C++ non-freezing plugin (`cpp_plugin/`) | **Code builds, doesn't load in MD.** Reserved for CLO 3D and for a hypothetical future MD that adds DLL loading. See `cpp_plugin/README.md`. |
 
 ## Key non-obvious facts (do not re-derive — verified empirically)
+
+### Additional observations on MD 2026.0.315
+
+- The path/dimension turntable overload returned `[]`; the count-only overload
+  wrote real PNGs to MD's temp folder. The feature layer uses that fallback,
+  verifies freshness, copies outputs and resizes them with local Pillow.
+- Indexed `GetPatternInputInformationW(1)` returned the right piece's name/edges
+  but labeled its record with local `Pattern index: 0`. Use the getter selector
+  and verify the name; do not assume this field is the global scene index.
+- No custom views were saved during validation. Checkpoint, OBJ, PNG/MCP image,
+  fabric-preset, and export-only workflow checks passed on the active four-piece
+  scene. Mutating pattern/sewing/import operations have signature verification
+  and stateful contract tests; they were not applied to the user's active scene.
+- `operations.py` contains standard-library-only code sent through
+  `execute_python`, so the feature layer works with the existing listener.
+  Pillow is a local server dependency, not an MD embedded-Python dependency.
 
 1. **MD's embedded Python doesn't schedule background threads.** A
    `threading.Thread(daemon=True)` is `is_alive() == True` but never executes.
@@ -57,9 +73,9 @@ LLM ──MCP/stdio──▶ src/marvelous_designer_mcp (FastMCP)
    / animation_api / rendering_api / techpack_api / simulation_api` do **not**
    exist as separate modules — those functions live inside the existing five
    modules (e.g. `import_api.ImportAvatar`, `export_api.ExportAnimationVideo`).
-5. **MD API is pybind11.** Call with wrong/no args and the `TypeError` lists
-   the accepted signatures verbatim — free signature discovery via
-   `md_api(module, contains)` then `execute_python` with wrong args.
+5. **MD API is pybind11.** Inspect function `__doc__` strings through
+   `execute_python` for accepted signatures. Wrong/no-argument probing can
+   invoke valid overloads; do not use it to discover mutating calls.
 6. **One JSON request per TCP connection.** Pipelining caused
    `WinError 10053` on Windows; the bridge opens a fresh socket per call.
 7. **Modal dialog deadlock.** Any MD API that pops a modal dialog hangs the
@@ -88,7 +104,8 @@ LLM ──MCP/stdio──▶ src/marvelous_designer_mcp (FastMCP)
 ```
 src/marvelous_designer_mcp/
 ├── __main__.py    `python -m marvelous_designer_mcp` entry
-├── server.py      FastMCP tools (11 total)
+├── server.py      FastMCP tools (26 total)
+├── operations.py  self-contained feature operations sent to MD
 ├── bridge.py      TCP JSON-line client
 └── config.py      HOST / PORT / TIMEOUT (env-overridable)
 md_addon/
@@ -114,9 +131,9 @@ pyproject.toml / uv.lock
 - The C++ path: only worth resurrecting if (a) CLO Virtual Fashion adds DLL
   loading to MD, or (b) the goal moves to CLO 3D. The existing `cpp_plugin/`
   builds and is set up to receive new wrapper methods one by one.
-- Areas not implemented and not gated on MD limitations: rendering wrappers
-  (`export_api.ExportTurntableImages` etc), techpack export, multi-colorway
-  handling, avatar import flows.
+- Areas not implemented: techpack export, multi-colorway handling, parametric
+  garment creation and physical fabric presets. Turntable/custom-view exports
+  and optional avatar imports in staged workflows are available in v0.3.
 
 ## Things explicitly tried and ruled out
 
