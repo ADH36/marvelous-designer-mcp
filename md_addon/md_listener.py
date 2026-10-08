@@ -1,16 +1,15 @@
-"""Marvelous Designer side MCP listener (blocking, runs on MD's main thread).
+"""Marvelous Designer side MCP listener (serial API calls on MD's main thread).
 
 MD's embedded Python (3.11) does not give CPU to background daemon threads, so
-the old thread-based server never actually bound a socket. This version runs a
-plain blocking accept loop on whatever thread the Python Editor uses (the main
-GUI thread). While it runs, MD's GUI is unresponsive; it stops when a client
-sends {"method": "shutdown"} (the MCP server exposes a `shutdown_listener`
-tool for that). To stop it without a client, close Marvelous Designer.
+the old thread-based server never actually bound a socket. Version 0.8 delegates
+to cooperative_listener: nonblocking sockets and Windows message dispatch while
+idle. API calls remain synchronous. Host integration awaits live validation.
+The MCP shutdown_listener tool stops the loop; no operation is automatically replayed.
 
 How to start it (paste into MD's Python Editor, or use scripts/md_start_listener.py):
 
     import sys
-    sys.path.insert(0, r"C:\\Users\\azoo\\git\\marvelous-designer-mcp\\md_addon")
+    sys.path.insert(0, r"C:\\path\\to\\marvelous-designer-mcp\\md_addon")
     import importlib, md_listener
     importlib.reload(md_listener)          # pick up edits without restarting MD
     md_listener.serve_forever()
@@ -46,26 +45,38 @@ def _handle_ping(_params: dict) -> dict:
     return {"pong": True}
 
 
-def _handle_execute_python(params: dict) -> dict:
-    code = params.get("code", "")
-    out, err = io.StringIO(), io.StringIO()
+class _BoundedOutput(io.StringIO):
+    def write(self, value):
+        super().write(value[:max(0, 65536 - self.tell())])
+        return len(value)
+
+
+def _execute_code(code, namespace) -> dict:
+    out, err = _BoundedOutput(), _BoundedOutput()
     result = None
     error = None
     try:
         # Don't accidentally return the previous call's result when this code
         # doesn't assign one.
-        _persistent_globals.pop("result", None)
+        namespace.pop("result", None)
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            exec(code, _persistent_globals)
-        result = _persistent_globals.get("result")
+            exec(code, namespace)
+        result = namespace.get("result")
     except Exception:
         error = traceback.format_exc()
     payload = {"stdout": out.getvalue(), "stderr": err.getvalue(), "result": result, "error": error}
     try:
-        json.dumps(payload)
-    except TypeError:
-        payload["result"] = repr(result)
+        json.dumps(payload, allow_nan=False)
+    except (TypeError, ValueError):
+        payload["result"] = repr(result)[:65536]
     return payload
+
+
+def _handle_execute_python(params: dict) -> dict:
+    code = params.get('code', '')
+    if not isinstance(code, str):
+        raise ValueError('code must be a string')
+    return _execute_code(code, _persistent_globals)
 
 
 HANDLERS = {
@@ -153,6 +164,13 @@ def _serve_conn(conn: socket.socket) -> bool:
 
 
 def serve_forever() -> None:
+    """Use serial native API execution with cooperative idle Windows dispatch."""
+    import sys
+    import cooperative_listener
+    cooperative_listener.serve_forever(sys.modules[__name__])
+
+
+def serve_blocking_legacy() -> None:
     """Blocking listener loop. Call this from MD's Python Editor.
 
     Blocks the MD GUI until a client sends {"method": "shutdown"}.

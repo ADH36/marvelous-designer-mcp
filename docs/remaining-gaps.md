@@ -1,3 +1,5 @@
+> Follow-up: [v0.8 UI and construction support](ui-and-construction.md) adds idle GUI pumping, triangle checks and matched construction drafts. This page records v0.7 behavior.
+
 # Remaining gap implementations (v0.7)
 
 This release adds 15 tools to the v0.6 source catalog, bringing the total to

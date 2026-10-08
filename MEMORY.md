@@ -1,3 +1,29 @@
+# Current handoff: v0.8.0 (2026-10-08)
+
+97 tools; complete catalog in README. See docs/ui-and-construction.md.
+User requested NO TESTS for v0.6/v0.7/v0.8. No live MD calls/scene changes in these
+updates. Latest live evidence: v0.5 skirt/top prototypes (42/67 tools exercised).
+
+md_listener.serve_forever delegates to cooperative_listener: nonblocking sockets
+and experimental idle Windows message dispatch through ctypes. Native calls remain
+synchronous. Stop the old listener and click the existing registered launcher
+again to activate; reconnect Codex/Hermes MCP servers afterward. No auto-activation.
+MD_MCP_UI_PUMP=0 belongs to MD's environment and selects idle-blocking fallback.
+SHA-keyed runtime cache is isolated from raw Python calls. Cache retry requires
+executed=false; old-listener fallback requires exact unknown-method error.
+I/O failures are uncertain and never automatically replayed.
+
+New local construction: triangle intersection checks, matched segmented sleeve
+caps, affine size variants, scaled SVG, reference migration proposals and supplied
+design evidence review. listener_status reads metadata without native API calls.
+Native per-piece 3D transforms/accessory creation/pressure sensing remain unsupported.
+Full colorway/cache/physical equivalence remain unverified. fit_certified=false.
+Untracked .github/ predates development; do not incidentally include it.
+
+---
+
+## Historical v0.5 handoff (superseded status and validation notes)
+
 # MEMORY.md — project context handoff
 
 A snapshot of what this repo is, what works, and what's been ruled out — so a

@@ -9,9 +9,9 @@ Two ways to use this file:
      `Plugins > Plug-in Manager > +ADD`, then click it under `Plugins > Plug-in`.
      One click instead of opening the editor and pasting.
 
-Either way it starts a blocking socket listener on 127.0.0.1:7421. **MD's GUI
-freezes while the listener runs** -- that is expected. Stop it by having a
-connected client call the `shutdown_listener` MCP tool (or by closing MD).
+Either way it starts a listener on 127.0.0.1:7421. Version 0.8 dispatches
+Windows GUI messages while idle; native calls remain synchronous and can pause
+the UI. This host integration awaits live validation. Stop through shutdown_listener.
 
 Re-running picks up edits to md_listener.py (the module is reloaded), so you do
 not need to restart MD after changing it.
@@ -55,8 +55,12 @@ _log(f"--- md-mcp listener launch; addon dir = {_ADDON_DIR} ---")
 try:
     import importlib
     import md_listener
+    import cooperative_listener
+    if cooperative_listener._running:
+        raise RuntimeError('Listener already running; stop it before restarting')
+    importlib.reload(cooperative_listener)
     importlib.reload(md_listener)
-    _log("starting serve_forever() -- MD GUI will be frozen until a client sends 'shutdown'")
+    _log("starting serve_forever() -- idle Windows GUI pump enabled unless MD_MCP_UI_PUMP=0; native calls remain synchronous")
     md_listener.serve_forever()
     _log("serve_forever() returned -- listener stopped, GUI released")
 except Exception:

@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from . import bridge, operations, recipes, advanced, geometry, native_controls, mesh_analysis, drafting
+from . import bridge, operations, recipes, advanced, geometry, native_controls, mesh_analysis, drafting, construction
 from .config import MD_HOST, MD_PORT
 
 mcp = FastMCP("marvelous-designer")
@@ -24,6 +24,11 @@ _RECIPE_SOURCE = Path(recipes.__file__).read_text(encoding="utf-8")
 _ADVANCED_SOURCE = Path(advanced.__file__).read_text(encoding="utf-8")
 _GEOMETRY_SOURCE = Path(geometry.__file__).read_text(encoding="utf-8")
 _NATIVE_SOURCE = Path(native_controls.__file__).read_text(encoding="utf-8")
+_RUNTIME_SOURCE = '\n'.join((_OPERATION_SOURCE, _RECIPE_SOURCE, _ADVANCED_SOURCE, _GEOMETRY_SOURCE, _NATIVE_SOURCE))
+_RUNTIME_DIGEST = hashlib.sha256(_RUNTIME_SOURCE.encode()).hexdigest()
+_runtime_installed = False
+_legacy_listener = False
+_runtime_lock = Lock()
 _history = deque(maxlen=100)
 _history_lock = Lock()
 _journal_lock = Lock()
@@ -43,6 +48,16 @@ def _persist_operation(entry):
             os.fsync(file.fileno())
 
 
+def _flatten_execution(resp) -> dict:
+    if not isinstance(resp, dict):
+        return {"ok": True, "result": resp}
+    out = {"ok": False, "error": resp["error"]} if resp.get("error") else {"ok": True, "result": resp.get("result")}
+    for stream in ('stdout', 'stderr'):
+        if resp.get(stream):
+            out[stream] = resp[stream]
+    return out
+
+
 def _md_exec(code: str, *, timeout: float | None = None) -> dict:
     """Run `code` inside MD via execute_python and flatten the listener's envelope.
 
@@ -53,23 +68,45 @@ def _md_exec(code: str, *, timeout: float | None = None) -> dict:
         resp = bridge.call("execute_python", {"code": code}, timeout=timeout)
     except bridge.BridgeError as e:
         return {"ok": False, "error": f"bridge: {e}"}
-    if not isinstance(resp, dict):
-        return {"ok": True, "result": resp}
-    out: dict = {"ok": False, "error": resp["error"]} if resp.get("error") else {"ok": True, "result": resp.get("result")}
-    if resp.get("stdout"):
-        out["stdout"] = resp["stdout"]
-    if resp.get("stderr"):
-        out["stderr"] = resp["stderr"]
-    return out
+    return _flatten_execution(resp)
 
 
 def _execute_md_operation(operation: str, *, timeout: float | None = None, **params) -> dict:
+    global _runtime_installed, _legacy_listener
     try:
         encoded = json.dumps(params, allow_nan=False, ensure_ascii=True)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}
-    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + '\n' + _ADVANCED_SOURCE + '\n' + _GEOMETRY_SOURCE + '\n' + _NATIVE_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
-    response = _md_exec(code, timeout=timeout)
+    if not _runtime_lock.acquire(blocking=False):
+        return {'ok':False,'error':'Another registered operation is active; this operation was not sent',
+                'partial_change_possible':False}
+    try:
+        if _legacy_listener:
+            response = _md_exec(_RUNTIME_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n", timeout=timeout)
+        else:
+            request = {'runtime_sha256': _RUNTIME_DIGEST, 'operation': operation, 'arguments': params}
+            if not _runtime_installed:
+                request['runtime_source'] = _RUNTIME_SOURCE
+            try:
+                raw = bridge.call('execute_operation', request, timeout=timeout)
+                if isinstance(raw, dict) and raw.get('runtime_cache_miss') is True and raw.get('executed') is False:
+                    # Cache miss guarantees no native call occurred; never retry I/O failures.
+                    request['runtime_source'] = _RUNTIME_SOURCE
+                    raw = bridge.call('execute_operation', request, timeout=timeout)
+                if isinstance(raw, dict) and raw.get('runtime_cache_miss'):
+                    response = {'ok': False, 'error': 'Listener runtime remained unavailable; operation not executed'}
+                else:
+                    _runtime_installed = isinstance(raw, dict) and not raw.get('error')
+                    response = _flatten_execution(raw)
+            except bridge.BridgeError as exc:
+                if str(exc) == 'unknown method: execute_operation':
+                    _legacy_listener = True
+                    response = _md_exec(_RUNTIME_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n", timeout=timeout)
+                else:
+                    _runtime_installed = False
+                    response = {'ok': False, 'error': 'bridge: ' + str(exc)}
+    finally:
+        _runtime_lock.release()
     if response.get("ok") and isinstance(response.get("result"), dict):
         outcome = response["result"]
         for stream in ("stdout", "stderr"):
@@ -964,6 +1001,73 @@ def inspect_native_pattern_geometry(pattern_index: int, export_path: str) -> dic
 
 
 @mcp.tool()
+def listener_status() -> dict:
+    """Read listener version, idle UI mode, runtime cache and last call timing without native API calls."""
+    def status():
+        result = bridge.call('ping')
+        if not isinstance(result,dict):
+            raise ValueError('Listener returned no status object')
+        return {'ok':True,'listener':result,
+                'restart_required_for_v08':result.get('listener_version')!='0.8.0',
+                'scope':'listener status only; responsiveness and garment quality are not verified'}
+    return _local_call(status)
+
+
+@mcp.tool()
+def analyze_surface_intersections(garment_path: str, other_path: str = '', epsilon: float = 0.000001,
+                                   max_candidates: int = 500000, time_budget_seconds: float = 30.0,
+                                   report_path: str = '') -> dict:
+    """Check triangle intersections/touching using local BVHs; optional second mesh or self-check."""
+    return _local_call(lambda:_save_analysis(mesh_analysis.analyze_intersections(
+        garment_path,other_path,epsilon,max_candidates,time_budget_seconds),report_path))
+
+
+@mcp.tool()
+def draft_matched_sleeve_cap(armhole_length: float, bicep_width: float, cuff_width: float,
+                             sleeve_length: float, minimum_cap_height: float, maximum_cap_height: float,
+                             ease_percent: float = 5.0, segments: int = 64, tolerance: float = 0.1,
+                             vertical_direction: Literal['up','down'] = 'down') -> dict:
+    """Solve a segmented sleeve-cap draft to an explicit measured armhole length/ease locally."""
+    return _local_call(lambda:construction.matched_sleeve_cap(armhole_length,bicep_width,cuff_width,
+        sleeve_length,minimum_cap_height,maximum_cap_height,ease_percent,segments,tolerance,vertical_direction))
+
+
+@mcp.tool()
+def draft_size_variants(points: list[list[float]], sizes: list[dict], pivot: list[float] | None = None) -> dict:
+    """Draft explicit affine polygon size variants with boundary measurements; no native grading rules."""
+    return _local_call(lambda:construction.size_variants(points,sizes,pivot))
+
+
+@mcp.tool()
+def export_construction_svg(path: str, stitch_outline: list[list[float]],
+                              cutting_outline: list[list[float]] | None = None,
+                              markers: list[dict] | None = None, units_per_mm: float = 1.0) -> dict:
+    """Save a scaled SVG stitch/cutting draft with explicit button, notch or closure markers locally."""
+    def export():
+        target=Path(operations._path(path,'.svg'))
+        svg,result=construction.construction_svg(stitch_outline,cutting_outline,markers,units_per_mm)
+        target.parent.mkdir(parents=True,exist_ok=True)
+        with target.open('x',encoding='utf-8') as file:
+            file.write(svg)
+        result['output_file']=str(target)
+        return result
+    return _local_call(export)
+
+
+@mcp.tool()
+def plan_reference_migration(before_path: str, after_path: str, report_path: str = '') -> dict:
+    """Propose piece identity mappings from unique names and exact exported geometry; never auto-rebind."""
+    return _local_call(lambda:_save_analysis(construction.migration_plan(
+        _read_json(before_path,max_bytes=10*1024*1024),_read_json(after_path,max_bytes=10*1024*1024)),report_path))
+
+
+@mcp.tool()
+def assess_design_evidence(checks: list[dict], report_path: str = '') -> dict:
+    """Organize explicit placement, sewing, clearance, deformation, appearance and recovery evidence locally."""
+    return _local_call(lambda:_save_analysis(construction.assess_evidence(checks),report_path))
+
+
+@mcp.tool()
 def inspect_capabilities() -> dict:
     """Inspect installed native function availability/docstrings without invoking those functions."""
     return _md_operation('inspect_capabilities')
@@ -1314,17 +1418,19 @@ def _fit_measurements(pattern_indices, targets, seam_pairs):
     return {'ok': measured.get('ok', False) and sewing.get('ok', False), 'measurements': measured, 'sewing': sewing}
 
 
-def _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path):
+def _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path,check_surface_intersections=False):
     if type(capture_mesh) is not bool:
         raise ValueError('capture_mesh must be boolean')
-    if (avatar_mesh_path or rest_mesh_path) and not capture_mesh:
+    if type(check_surface_intersections) is not bool:
+        raise ValueError('check_surface_intersections must be boolean')
+    if (avatar_mesh_path or rest_mesh_path or check_surface_intersections) and not capture_mesh:
         raise ValueError('Avatar/rest diagnostics require capture_mesh=True')
     for path in (avatar_mesh_path,rest_mesh_path):
         if path:
             mesh_analysis.read_triangles(path)
 
 
-def _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path):
+def _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path,check_surface_intersections=False):
     snapshot=outcome.get('mesh_after',outcome.get('mesh',{}))
     path=snapshot.get('metrics',{}).get('path')
     if not path:
@@ -1339,6 +1445,12 @@ def _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path):
             except (OSError,ValueError,TypeError) as exc:
                 diagnostics[name]={'ok':False,'error':str(exc),'fit_certified':False}
     outcome['geometric_diagnostics']=diagnostics
+    if check_surface_intersections:
+        for name,other in [('self_intersections','')]+([('avatar_intersections',avatar_mesh_path)] if avatar_mesh_path else []):
+            try:
+                diagnostics[name]=mesh_analysis.analyze_intersections(path,other)
+            except (OSError,ValueError,TypeError) as exc:
+                diagnostics[name]={'ok':False,'error':str(exc),'analysis_complete':False}
     outcome['native_fit_sensors']=False
 
 
@@ -1367,22 +1479,25 @@ def _fit_error(outcome):
 def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: list[dict] | None = None,
                        seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
                        preview_count: int = 4, capture_mesh: bool = True,
-                       avatar_mesh_path: str = '', rest_mesh_path: str = '') -> CallToolResult:
+                       avatar_mesh_path: str = '', rest_mesh_path: str = '',
+                       check_surface_intersections: bool = False) -> CallToolResult:
     """Return garment images, edge target comparisons, seam diagnostics and a saved fit report.
 
     Does not simulate. Observations are caller supplied; no automated body collision,
     pressure, strain, wrinkle or fit certification is inferred from measurements.
     Optional explicit avatar/rest OBJ files enable labeled geometric diagnostics.
+    check_surface_intersections adds bounded self/avatar checks; inspect their
+    analysis_complete fields independently of capture success.
     """
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
-        _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path)
+        _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
         outcome = _fit_measurements(pattern_indices, targets, seam_pairs)
         if capture_mesh and outcome.get('ok'):
             mesh = capture_mesh_snapshot(str(folder/'mesh'/'garment.obj'))
             outcome['mesh'] = mesh
             outcome['ok'] = mesh.get('ok',False)
-            _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path)
+            _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
         return _fit_result(outcome, folder, observations, preview_count)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return _fit_error({'ok': False, 'error': str(exc)})
@@ -1403,7 +1518,7 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                      seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
                      preview_count: int = 4, timeout: float = 300.0,
                      capture_mesh: bool = True, avatar_mesh_path: str = '',
-                     rest_mesh_path: str = '') -> CallToolResult:
+                     rest_mesh_path: str = '', check_surface_intersections: bool = False) -> CallToolResult:
     """Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report.
 
     steps is the native Simulate(int) argument, limited to 1–200. Quality 0 normal,
@@ -1413,7 +1528,7 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
     outcome = {'ok': False}
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
-        _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path)
+        _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
         preflight = _fit_measurements(pattern_indices, targets, seam_pairs)
         if not preflight['ok']:
             return _fit_error(preflight)
@@ -1434,7 +1549,7 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                 outcome['ok'] = outcome.get('ok',False) and after_mesh.get('ok',False)
                 if after_mesh.get('ok'):
                     outcome['mesh_comparison']=geometry.compare_meshes(before_mesh['metrics']['path'],after_mesh['metrics']['path'])
-                    _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path)
+                    _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
         return _fit_result(outcome, folder, observations, preview_count)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         outcome.update(ok=False, error=str(exc))

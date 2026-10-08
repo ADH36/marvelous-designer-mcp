@@ -20,10 +20,11 @@ LLM  ──MCP(stdio)──▶  MCP server (this repo, FastMCP)
                                       pattern_api / utility_api / ...
 ```
 
-MD's embedded Python (3.11) does **not** schedule background threads, so the
-listener is a plain blocking accept loop that runs on MD's GUI thread. **While the
-listener is running, MD's window is unresponsive** — that's expected. Stop it with
-the `shutdown_listener` tool (or by closing MD).
+The listener runs native API calls on MD's GUI thread. Version 0.8 adds
+nonblocking socket I/O and an experimental Windows message pump while idle.
+Long native simulations/exports can still pause the UI. See
+[activation and limits](docs/ui-and-construction.md). The idle UI integration
+has not been live validated.
 
 ## Requirements
 
@@ -43,8 +44,8 @@ uv sync
 
 ### 1. Start the listener inside Marvelous Designer
 
-`scripts/md_start_listener.py` starts a blocking socket listener on
-`127.0.0.1:7421`. **MD's GUI freezes while it runs — that's the ready state.**
+`scripts/md_start_listener.py` starts the listener on `127.0.0.1:7421`.
+Windows v0.8 dispatches GUI messages while idle; native calls remain synchronous.
 Stop it later with the `shutdown_listener` tool (or by closing MD). See
 [Why does MD freeze?](#why-does-md-freeze-while-the-listener-runs) below.
 
@@ -109,7 +110,7 @@ tools to work.
 
 <!-- TOOLS:START -->
 
-**Total: 90 MCP tools (v0.7.0).**
+**Total: 97 MCP tools (v0.8.0).**
 
 Every registered tool is listed individually below. Required inputs are shown;
 the MCP schema supplies optional settings and defaults.
@@ -118,12 +119,14 @@ the MCP schema supplies optional settings and defaults.
 |---|---|---|
 | `analyze_mesh_deformation` | `rest_path`, `current_path` | Measure geometric edge elongation against an explicit matching reference OBJ locally. |
 | `analyze_mesh_fit` | `garment_path`, `avatar_path` | Analyze sampled garment-to-avatar surface clearance and closed-mesh inside candidates locally. |
+| `analyze_surface_intersections` | `garment_path` | Check triangle intersections/touching using local BVHs; optional second mesh or self-check. |
 | `animation_state` | — | Read the current animation frame and start/end range. |
 | `apply_fit_adjustments` | `registry_path`, `adjustments`, `checkpoint_path` | Checkpoint and apply explicit bounded move_2d, layer or resolution corrections to named pieces. |
 | `apply_garment_recipe` | `recipe` | Review or apply an explicit garment recipe. Dry-run is the default. |
 | `arrange_patterns` | `pattern_indices`, `arrangement_index` | Assign patterns to an installed avatar arrangement point and read the resulting properties. |
 | `arrange_patterns_by_name` | `pattern_indices`, `arrangement_name`, `output_dir` | Resolve an exact discovered avatar arrangement name and apply it with mesh evidence. |
 | `arrange_patterns_verified` | `pattern_indices`, `arrangement_index`, `output_dir` | Checkpoint/apply arrangement and compare actual exported garment meshes before and after. |
+| `assess_design_evidence` | `checks` | Organize explicit placement, sewing, clearance, deformation, appearance and recovery evidence locally. |
 | `assign_fabric` | `fabric_index`, `pattern_index` | Assign fabric with colorway mode 1=current, 2=all unlinked, 3=all linked. |
 | `assign_fabric_batch` | `fabric_index`, `pattern_indices` | Assign one fabric to multiple pieces with preflight bounds checks. |
 | `backup_fabric_presets` | `output_dir`, `fabric_indices` | Export native fabric presets with unique names and SHA-256 recovery manifests. |
@@ -149,9 +152,12 @@ the MCP schema supplies optional settings and defaults.
 | `diagnose_sewing` | `seam_pairs` | Compare explicit boundary pairs, report length mismatches/reused edges and a sewing map. |
 | `draft_closure_layout` | `start`, `end`, `placket_width` | Draft local placket geometry and button/zipper centerlines; no native accessory placement. |
 | `draft_dart` | `points`, `edge_index`, `intake`, `depth` | Draft a straight-polygon cut-out dart with equal legs and proposed seam indices locally. |
+| `draft_matched_sleeve_cap` | `armhole_length`, `bicep_width`, `cuff_width`, `sleeve_length`, `minimum_cap_height`, `maximum_cap_height` | Solve a segmented sleeve-cap draft to an explicit measured armhole length/ease locally. |
 | `draft_seam_allowance` | `points`, `width` | Generate a local straight-polygon cutting outline with explicit allowance and miter bounds. |
+| `draft_size_variants` | `points`, `sizes` | Draft explicit affine polygon size variants with boundary measurements; no native grading rules. |
 | `execute_python` | `code` | Execute arbitrary Python inside Marvelous Designer's interpreter. |
 | `export_alembic` | `path` | Export garment animation to a fresh Alembic file using explicit options. |
+| `export_construction_svg` | `path`, `stitch_outline` | Save a scaled SVG stitch/cutting draft with explicit button, notch or closure markers locally. |
 | `export_custom_views` | `output_dir` | Export saved MD custom views into an absolute output directory. |
 | `export_obj` | `path` | Export garment OBJ with explicit options to avoid an export dialog. |
 | `export_obj_with_profile` | `path`, `profile_path` | Export OBJ using a saved, destination-validated profile and explicit options. |
@@ -173,12 +179,14 @@ the MCP schema supplies optional settings and defaults.
 | `list_fabrics` | — | List fabrics in the current scene: index and name (plus the fabric-style name list). |
 | `list_patterns` | — | List pattern pieces in the current scene: index, name, assigned fabric index. |
 | `list_seams` | — | List the sewing groups in the current scene by index and name. |
+| `listener_status` | — | Read listener version, idle UI mode, runtime cache and last call timing without native API calls. |
 | `load_garment_recipe` | `path` | Load and validate a data-only recipe JSON, with no scene changes. |
 | `md_api` | `module` | List public attributes of an installed MD API module, optionally filtered by name. |
 | `measure_patterns` | `pattern_indices` | Measure 2D boundary lengths and compare explicit edge targets/tolerances in native units. |
 | `mirror_pattern` | `pattern_index` | Create a symmetric pattern, optionally including sewing. |
 | `move_pattern_2d` | `pattern_index`, `x`, `y` | Move a piece in the 2D editor and verify its position; uses native units. |
 | `ping` | — | Verify the MD listener is reachable. Returns whatever the listener echoes back. |
+| `plan_reference_migration` | `before_path`, `after_path` | Propose piece identity mappings from unique names and exact exported geometry; never auto-rebind. |
 | `plan_sleeve_cap` | `armhole_edges`, `cap_edges` | Measure actual armhole/cap edges and calculate explicit sleeve ease and length correction. |
 | `preview_garment` | `output_dir` | Generate up to 8 turntable views and return PNG image content to the agent. |
 | `read_operation_journal` | `path` | Read durable operation events locally; incomplete starts remain uncertain and are never replayed. |
@@ -211,7 +219,7 @@ the MCP schema supplies optional settings and defaults.
 
 Anything not covered by a wrapper: use `execute_python` directly.
 
-Version 0.7 exposes 90 tools. See [remaining gap implementations](docs/remaining-gaps.md), [live-test gap fixes](docs/live-test-improvements.md), [garment/export contracts](docs/features.md) and
+Version 0.8 exposes 97 tools. See [UI and construction support](docs/ui-and-construction.md), [remaining gap implementations](docs/remaining-gaps.md), [live-test gap fixes](docs/live-test-improvements.md), [garment/export contracts](docs/features.md) and
 [recipe, animation and batch examples](docs/recipes.md), and
 [complex garment controls](docs/complex-design.md) for checkpoint guidance
 and validation limits. Restart the MCP client
@@ -239,7 +247,7 @@ The tool catalog is generated from FastMCP schemas; after adding tools, run
 `uv run python scripts/update_tool_catalog.py` to update every row and the total.
 The v0.5 live session exercised 42/67 tools, including all 25 new v0.5 names,
 and produced a simulated skirt and sleeveless pocket top. It found placement,
-coordinate and JSON settings gaps. Versions 0.6 and 0.7 address those findings in code;
+coordinate and JSON settings gaps. Versions 0.6, 0.7 and 0.8 address those findings in code;
 **no tests or live MD calls were run for these implementations, at the user's request**.
 See [the implementation and remaining native API limits](docs/remaining-gaps.md).
 Generate the catalog without importing the server using
@@ -247,23 +255,22 @@ Generate the catalog without importing the server using
 
 ## Why does MD freeze while the listener runs?
 
-MD's embedded Python (3.11) doesn't give CPU to background threads — a daemon
-thread spawned from a script is `is_alive() == True` but never actually
-executes. So the socket server has to run on whatever thread the Python Editor
-uses, which is MD's GUI thread. Empirically (verified live), API calls work
-fine while the GUI is frozen because they are synchronous main-thread calls;
-the GUI just doesn't repaint or accept input until the listener returns.
+Earlier listeners blocked the GUI thread waiting for requests. MD's embedded
+Python did not schedule our background listener threads in prior experiments.
+Version 0.8 keeps native calls on that thread but polls sockets and dispatches
+Windows GUI messages while idle through ctypes. It caches registered runtime
+source to reduce repeated compilation/transmission. Host integration is
+experimental until a live check is authorized. Long native calls and modal
+operations can still block the UI; timeout does not cancel execution.
 
-The "right" fix is a C++ plugin (Qt-based, worker thread + queued connection
-back to the main thread). We built and tested that for CLO 3D's plugin model
-in `cpp_plugin/` — but **MD's loader scans only `.py` files** and ignores
-`.dll`s entirely (verified with a zero-dep probe DLL). The C++ code is kept
-for CLO 3D and for the day MD adds a `.dll` loader; see `cpp_plugin/README.md`.
+Stop the old listener, click the existing plugin again, then reconnect
+Codex/Hermes MCP servers. The running listener/scene was untouched during this
+update. See [activation and fallback](docs/ui-and-construction.md).
 
 ## Caveats
 
-- **MD freezes while the listener runs.** Use `shutdown_listener` when you want the
-  GUI back. For an LLM-driven workflow this is usually fine — Claude does the work.
+- **Idle UI integration is unvalidated.** Native calls can still pause the window.
+  `MD_MCP_UI_PUMP=0` in MD selects compatibility mode.
 - **Modal-dialog deadlock.** Any API call that pops a modal dialog (unsaved-changes
   prompt, error popup, file picker) hangs the listener forever, because MD's GUI
   thread is stuck in our loop. Recovery: close MD. The wrappers pick dialog-free
@@ -286,12 +293,13 @@ for CLO 3D and for the day MD adds a `.dll` loader; see `cpp_plugin/README.md`.
 | `MD_MCP_HOST` | `127.0.0.1` | listener host the bridge connects to |
 | `MD_MCP_PORT` | `7421` | listener port |
 | `MD_MCP_TIMEOUT` | `120.0` | bridge socket timeout, seconds |
-| `MD_MCP_MAX_RESPONSE_BYTES` | `16777216` | maximum listener response line size |
+| `MD_MCP_MAX_RESPONSE_BYTES` | `16777216` | maximum client response line size |
+| `MD_MCP_UI_PUMP` | `1` | **MD process only:** 0 disables idle Windows message pumping |
 
 The listener-side request read timeout and 1 MiB request limit are defined in
 `md_addon/md_listener.py` (`REQUEST_READ_TIMEOUT` and `MAX_REQUEST_BYTES`).
-Listener responses are limited to 16 MiB by default. Raise
-`MD_MCP_MAX_RESPONSE_BYTES` if a workflow returns larger values.
+Both the v0.8 listener and client default to a 16 MiB response limit.
+Changing the client limit alone does not change the listener limit.
 
 (The listener side's host/port are constants in `md_addon/md_listener.py` — keep
 them in sync if you change the defaults.)

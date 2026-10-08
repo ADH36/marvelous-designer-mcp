@@ -1,6 +1,7 @@
 """Offline geometric evidence, not MD pressure/strain/collision sensor values."""
 import heapq
 import math
+import time
 from collections import Counter
 
 from .operations import _path, _integer
@@ -279,3 +280,91 @@ def analyze_deformation(rest_path,current_path,stretch_limit_percent=10.0):
             'fit_certified':False,'native_strain_sensor':False,
             'scope':'geometric edge elongation relative to caller-supplied rest mesh; not MD stress, pressure or material strain',
             'correspondence':'caller must establish stable export vertex order; connectivity alone is not persistent identity'}
+
+
+def _boxes_overlap(a, b, epsilon):
+    return all(a[0][i] <= b[1][i] + epsilon and b[0][i] <= a[1][i] + epsilon for i in range(3))
+
+
+def _triangles_overlap(first, second, epsilon):
+    """Separating axes for triangles, including coplanar/touching cases."""
+    aedges = [sub(first[(i+1)%3], first[i]) for i in range(3)]
+    bedges = [sub(second[(i+1)%3], second[i]) for i in range(3)]
+    anormal, bnormal = cross(aedges[0], aedges[1]), cross(bedges[0], bedges[1])
+    axes = [anormal, bnormal]
+    axes.extend(cross(a,b) for a in aedges for b in bedges)
+    axes.extend(cross(anormal,e) for e in aedges)
+    axes.extend(cross(bnormal,e) for e in bedges)
+    for axis in axes:
+        magnitude = math.sqrt(dot(axis,axis))
+        if magnitude < 1e-15:
+            continue
+        # Translate to one local origin to reduce large-coordinate cancellation.
+        av = [dot(sub(p,first[0]),axis)/magnitude for p in first]
+        bv = [dot(sub(p,first[0]),axis)/magnitude for p in second]
+        if max(av) < min(bv)-epsilon or max(bv) < min(av)-epsilon:
+            return False
+    return True
+
+
+def analyze_intersections(garment_path, other_path='', epsilon=1e-6,
+                          max_candidates=500000, time_budget_seconds=30.0):
+    epsilon = recipe_number(epsilon,'epsilon',True)
+    _integer(max_candidates,'max_candidates',minimum=100,maximum=5000000)
+    budget = recipe_number(time_budget_seconds,'time_budget_seconds',True)
+    if budget > 60:
+        raise ValueError('time_budget_seconds must not exceed 60')
+    vertices, faces = read_triangles(garment_path)
+    own = TriangleTree(vertices,faces)
+    self_check = not other_path
+    other_vertices, other_faces = (vertices,faces) if self_check else read_triangles(other_path)
+    other = own if self_check else TriangleTree(other_vertices,other_faces)
+    started = time.monotonic()
+    deadline = started + budget
+    tested = hits = visited = 0
+    worst = []
+    complete, reason = True, None
+    for i, box in enumerate(own.boxes):
+        if box is None:
+            continue
+        stack = [other.root]
+        while stack:
+            visited += 1
+            if time.monotonic() > deadline:
+                complete,reason = False,'time budget reached'
+                break
+            node = stack.pop()
+            lo,hi,left,right,indices = other.nodes[node]
+            if not _boxes_overlap(box,(lo,hi),epsilon):
+                continue
+            if indices is None:
+                stack.extend((left,right))
+                continue
+            for j in indices:
+                if self_check and (j <= i or set(faces[i]) & set(faces[j])):
+                    continue
+                if not _boxes_overlap(box,other.boxes[j],epsilon):
+                    continue
+                if tested >= max_candidates:
+                    complete,reason = False,'candidate comparison limit reached'
+                    break
+                tested += 1
+                if _triangles_overlap([vertices[k] for k in faces[i]],
+                                      [other_vertices[k] for k in other_faces[j]],epsilon):
+                    hits += 1
+                    if len(worst) < 100:
+                        worst.append({'garment_triangle':i,'other_triangle':j})
+            if not complete:
+                break
+        if not complete:
+            break
+    return {'ok':complete,'analysis_complete':complete,'stop_reason':reason,
+            'garment_path':garment_path,'other_path':other_path or garment_path,
+            'self_intersections':self_check,'triangle_pairs_tested':tested,'bvh_nodes_visited':visited,
+            'intersecting_or_touching_pairs':hits,'examples':worst,'epsilon':epsilon,
+            'garment_degenerate_triangles':own.degenerate,'other_degenerate_triangles':other.degenerate,
+            'elapsed_seconds':round(time.monotonic()-started,3),'fit_certified':False,
+            'limits':['same coordinates and units required','touching and coplanar overlap are included',
+                      'self-check excludes pairs sharing any mesh vertex, including adjacent folded faces',
+                      'degenerate triangles are excluded','zero pairs in incomplete analysis is not a clean result',
+                      'surface intersections do not detect closed-volume containment or certify physical fit']}
