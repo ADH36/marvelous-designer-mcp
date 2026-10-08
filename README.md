@@ -23,8 +23,9 @@ LLM  ──MCP(stdio)──▶  MCP server (this repo, FastMCP)
 The listener runs native API calls on MD's GUI thread. Version 0.8 adds
 nonblocking socket I/O and an experimental Windows message pump while idle.
 Long native simulations/exports can still pause the UI. See
-[activation and limits](docs/ui-and-construction.md). The idle UI integration
-has not been live validated.
+[activation and limits](docs/ui-and-construction.md). Idle responsiveness was
+confirmed on Windows with MD 2026.0.315. [v0.8.1 recovery fixes and validation](docs/live-v08-fixes.md)
+describe the evidence and remaining limits.
 
 ## Requirements
 
@@ -110,7 +111,7 @@ tools to work.
 
 <!-- TOOLS:START -->
 
-**Total: 97 MCP tools (v0.8.0).**
+**Total: 97 MCP tools (v0.8.1).**
 
 Every registered tool is listed individually below. Required inputs are shown;
 the MCP schema supplies optional settings and defaults.
@@ -119,7 +120,7 @@ the MCP schema supplies optional settings and defaults.
 |---|---|---|
 | `analyze_mesh_deformation` | `rest_path`, `current_path` | Measure geometric edge elongation against an explicit matching reference OBJ locally. |
 | `analyze_mesh_fit` | `garment_path`, `avatar_path` | Analyze sampled garment-to-avatar surface clearance and closed-mesh inside candidates locally. |
-| `analyze_surface_intersections` | `garment_path` | Check triangle intersections/touching using local BVHs; optional second mesh or self-check. |
+| `analyze_surface_intersections` | `garment_path` | Classify crossings, coplanar overlaps and contacts with provenance and optional SVG closeups. |
 | `animation_state` | — | Read the current animation frame and start/end range. |
 | `apply_fit_adjustments` | `registry_path`, `adjustments`, `checkpoint_path` | Checkpoint and apply explicit bounded move_2d, layer or resolution corrections to named pieces. |
 | `apply_garment_recipe` | `recipe` | Review or apply an explicit garment recipe. Dry-run is the default. |
@@ -129,7 +130,7 @@ the MCP schema supplies optional settings and defaults.
 | `assess_design_evidence` | `checks` | Organize explicit placement, sewing, clearance, deformation, appearance and recovery evidence locally. |
 | `assign_fabric` | `fabric_index`, `pattern_index` | Assign fabric with colorway mode 1=current, 2=all unlinked, 3=all linked. |
 | `assign_fabric_batch` | `fabric_index`, `pattern_indices` | Assign one fabric to multiple pieces with preflight bounds checks. |
-| `backup_fabric_presets` | `output_dir`, `fabric_indices` | Export native fabric presets with unique names and SHA-256 recovery manifests. |
+| `backup_fabric_presets` | `output_dir`, `fabric_indices` | Export native fabric presets with pattern associations and SHA-256 recovery manifests. |
 | `batch_garment_workflows` | `jobs`, `output_dir` | Process 1–50 .zprj projects independently with checkpoints and a JSON report. |
 | `bind_pattern_reference` | `registry_path`, `ref_id`, `pattern_index`, `edge_names` | Persist a piece reference and named boundary edges using name plus geometry signature. |
 | `build_bodice_block` | `bust_cm`, `length_cm`, `shoulder_width_cm`, `neck_width_cm`, `armhole_depth_cm` | Draft local front/back bodice spline templates with explicit cm scale and Y direction. |
@@ -188,7 +189,7 @@ the MCP schema supplies optional settings and defaults.
 | `ping` | — | Verify the MD listener is reachable. Returns whatever the listener echoes back. |
 | `plan_reference_migration` | `before_path`, `after_path` | Propose piece identity mappings from unique names and exact exported geometry; never auto-rebind. |
 | `plan_sleeve_cap` | `armhole_edges`, `cap_edges` | Measure actual armhole/cap edges and calculate explicit sleeve ease and length correction. |
-| `preview_garment` | `output_dir` | Generate up to 8 turntable views and return PNG image content to the agent. |
+| `preview_garment` | `output_dir` | Return up to 8 turntable or saved custom-view PNGs with native resolution evidence. |
 | `read_operation_journal` | `path` | Read durable operation events locally; incomplete starts remain uncertain and are never replayed. |
 | `record_animation` | `start_frame`, `end_frame`, `checkpoint_path` | Checkpoint then run MD animation recording for an explicit frame range. |
 | `redrape_garment` | `output_dir` | Checkpoint and explicitly redrape the whole garment with before/after mesh evidence. |
@@ -196,7 +197,7 @@ the MCP schema supplies optional settings and defaults.
 | `replace_fabric` | `fabric_index`, `path` | Replace an existing fabric using a .zfab file. Verify appearance separately. |
 | `resolve_pattern_reference` | `registry_path`, `ref_id` | Resolve a saved piece/edge reference to current indices, rejecting stale or ambiguous matches. |
 | `restore_checkpoint` | `manifest_path`, `preserve_current_path` | Verify a checkpoint hash, preserve the current scene, load and verify count/names. |
-| `restore_fabric_presets` | `manifest_path`, `checkpoint_path` | Verify preset backup hashes, checkpoint and restore uniquely named existing fabrics. |
+| `restore_fabric_presets` | `manifest_path`, `checkpoint_path` | Verify preset hashes, checkpoint and restore names/assignments with unambiguous mappings. |
 | `run_fitting_pass` | `output_dir`, `pattern_indices` | Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report. |
 | `save_checkpoint` | `path` | Save a .zprj checkpoint without a thumbnail dialog and verify the file. |
 | `save_export_profile` | `path`, `destination`, `scale`, `axis_codes`, `invert_axes`, `calibration_note` | Save explicit destination scale/axes. No destination defaults are guessed. |
@@ -219,7 +220,7 @@ the MCP schema supplies optional settings and defaults.
 
 Anything not covered by a wrapper: use `execute_python` directly.
 
-Version 0.8 exposes 97 tools. See [UI and construction support](docs/ui-and-construction.md), [remaining gap implementations](docs/remaining-gaps.md), [live-test gap fixes](docs/live-test-improvements.md), [garment/export contracts](docs/features.md) and
+Version 0.8.1 exposes 97 tools. See [current fixes and validation](docs/live-v08-fixes.md), [UI and construction support](docs/ui-and-construction.md), [remaining gap implementations](docs/remaining-gaps.md), [live-test gap fixes](docs/live-test-improvements.md), [garment/export contracts](docs/features.md) and
 [recipe, animation and batch examples](docs/recipes.md), and
 [complex garment controls](docs/complex-design.md) for checkpoint guidance
 and validation limits. Restart the MCP client
@@ -248,7 +249,10 @@ The tool catalog is generated from FastMCP schemas; after adding tools, run
 The v0.5 live session exercised 42/67 tools, including all 25 new v0.5 names,
 and produced a simulated skirt and sleeveless pocket top. It found placement,
 coordinate and JSON settings gaps. Versions 0.6, 0.7 and 0.8 address those findings in code;
-**no tests or live MD calls were run for these implementations, at the user's request**.
+Their implementation initially deferred testing at the user's request. Subsequent
+authorized v0.8 testing exercised 54/97 tool names, including all 30 new names.
+The v0.8.1 patch fixes reproduced fabric recovery failures, guards unsupported
+translation, improves fit review and modernizes the regression suite.
 See [the implementation and remaining native API limits](docs/remaining-gaps.md).
 Generate the catalog without importing the server using
 `python scripts/update_tool_catalog.py --static` when execution is intentionally deferred.
@@ -260,16 +264,17 @@ Python did not schedule our background listener threads in prior experiments.
 Version 0.8 keeps native calls on that thread but polls sockets and dispatches
 Windows GUI messages while idle through ctypes. It caches registered runtime
 source to reduce repeated compilation/transmission. Host integration is
-experimental until a live check is authorized. Long native calls and modal
+validated for idle interaction on one Windows/MD 2026.0.315 host. Long native calls and modal
 operations can still block the UI; timeout does not cancel execution.
 
 Stop the old listener, click the existing plugin again, then reconnect
-Codex/Hermes MCP servers. The running listener/scene was untouched during this
-update. See [activation and fallback](docs/ui-and-construction.md).
+Codex/Hermes MCP servers. Source updates do not replace a running listener.
+The v0.8.1 recovery check restored the starting scene and left its listener
+running. Restart it to load updated status metadata. See [activation and fallback](docs/ui-and-construction.md).
 
 ## Caveats
 
-- **Idle UI integration is unvalidated.** Native calls can still pause the window.
+- **Idle UI evidence is host-specific.** Native calls can still pause the window.
   `MD_MCP_UI_PUMP=0` in MD selects compatibility mode.
 - **Modal-dialog deadlock.** Any API call that pops a modal dialog (unsaved-changes
   prompt, error popup, file picker) hangs the listener forever, because MD's GUI

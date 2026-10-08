@@ -1,3 +1,5 @@
+> Current contracts and validation: [v0.8.1 fixes](live-v08-fixes.md). The release-specific counts and deferred-test notes below are historical.
+
 > Follow-up: [v0.8 UI and construction support](ui-and-construction.md) adds idle GUI pumping, triangle checks and matched construction drafts. This page records v0.7 behavior.
 
 # Remaining gap implementations (v0.7)

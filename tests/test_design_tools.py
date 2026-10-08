@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from test_operations import FakeMD
+from md_transport import install_transport
 from marvelous_designer_mcp import operations as ops, recipes
 
 try:
@@ -109,12 +110,13 @@ class RecipeValidationTests(unittest.TestCase):
         recipe = recipes.skirt_recipe(75, 60, 120)
         front = recipe['pieces'][0]['points']
         self.assertEqual(front[1][0]-front[0][0], 385)
-        self.assertEqual(front[2][1], 600)
+        self.assertEqual(front[2][1], -600)
         self.assertEqual(front[2][0]-front[3][0], 600)
         self.assertEqual(len(recipe['seams']), 2)
 
     def test_scale_is_explicit(self):
-        self.assertEqual(recipes.skirt_recipe(75, 60, 120, native_units_per_cm=1)['pieces'][0]['points'][2][1], 60)
+        self.assertEqual(recipes.skirt_recipe(75, 60, 120, native_units_per_cm=1)['pieces'][0]['points'][2][1], -60)
+        self.assertEqual(recipes.skirt_recipe(75, 60, 120, native_units_per_cm=1, vertical_direction='up')['pieces'][0]['points'][2][1], 60)
 
     def test_invalid_polygons(self):
         for points in ([[0,0],[1,1],[0,1],[1,0]], [[0,0],[1,0],[2,0]], [[0,0],[1,0],[0,0]],
@@ -311,17 +313,11 @@ class DesignServerTests(unittest.TestCase):
     # Integration cases use the same stateful fake through generated MD source.
     def setUp(self):
         DesignOperationTests.setUp(self)
-        def execute(method, params, *, timeout=None):
-            namespace = {}
-            exec(params['code'], namespace)
-            return {'result': namespace['result'], 'error':None}
-        patcher = patch.object(server.bridge,'call',side_effect=execute)
-        self.bridge_mock = patcher.start()
-        self.addCleanup(patcher.stop)
+        install_transport(self,server)
 
     def test_registered_design_schemas(self):
         tools = {t.name:t for t in asyncio.run(server.mcp.list_tools())}
-        self.assertEqual(len(tools), 67)
+        self.assertEqual(len(tools), 97)
         self.assertTrue(tools['apply_garment_recipe'].inputSchema['properties']['dry_run']['default'])
         self.assertEqual(tools['assign_fabric'].inputSchema['properties']['assignment_mode']['default'], 1)
 

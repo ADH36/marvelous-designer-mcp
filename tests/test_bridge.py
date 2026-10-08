@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,6 +16,10 @@ class FakeSocket:
         self.response = bytearray(response)
         self.sent = bytearray()
         self.closed = False
+        self.timeouts=[]
+
+    def settimeout(self,value):
+        self.timeouts.append(value)
 
     def __enter__(self) -> "FakeSocket":
         return self
@@ -49,10 +54,12 @@ class BridgeTests(unittest.TestCase):
         result, fake = self.call_with_response(response)
         self.assertEqual(result, {"pong": True})
         self.assertTrue(fake.closed)
-        self.assertEqual(
-            json.loads(fake.sent),
-            {"id": self.request_id, "method": "ping", "params": {}},
-        )
+        sent=json.loads(fake.sent)
+        deadline=sent.pop('expires_at_unix')
+        self.assertGreater(deadline,time.time())
+        self.assertLessEqual(deadline,time.time()+2)
+        self.assertEqual(sent,{"id": self.request_id, "method": "ping", "params": {}})
+        self.assertTrue(all(0<value<=2 for value in fake.timeouts))
 
     def test_rejects_mismatched_response_id(self) -> None:
         response = b'{"id":"wrong","result":true}\n'

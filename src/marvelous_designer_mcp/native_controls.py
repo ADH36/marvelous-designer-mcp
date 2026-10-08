@@ -25,7 +25,8 @@ def inspect_capabilities():
         'pattern_api':['CreatePatternWithPoints','CreateInternalShapeWithPoints','SetArrangement',
                        'SetArrangementPosition','SetArrangementOrientation','MovePatternPoint',
                        'GetAddlThicknessCollisionValue','SetAddlThicknessCollision'],
-        'fabric_api':['ExportZFabW','ReplaceFabric','GetFabricInfo'],
+        'fabric_api':['ExportZFabW','ReplaceFabric','GetFabricInfo','SetFabricNameW','GetFabricCount'],
+        'export_api':['ExportTurntableImagesW','ExportCustomViewSnapshotW'],
         'utility_api':['ReDrape3DArrangement','Refresh3DWindow','GetClothPositions',
                        'GetZipperStyleName','SetZipperStyleTeethWidth','GetZipperStyleTeethWidth']}
     records=[]
@@ -40,6 +41,12 @@ def inspect_capabilities():
             records.append({'module':module,'name':name,'available':callable(value),
                             'doc':(getattr(value,'__doc__','') or '')[:6000] if callable(value) else None})
     return {'ok':True,'capabilities':records,'invoked_api_functions':False,
+            'workflow_support':{
+                'rigid_3d_translation':{'status':'unsupported','reason':'ReDrape offsets had no effect in live MD 2026.0.315 test; no verified rigid setter'},
+                'native_closure_creation':{'status':'unsupported','reason':'closure layouts are drafts; zipper wrappers edit existing styles'},
+                'detailed_native_capture':{'status':'requires_saved_views','route':'preview_garment capture_mode=custom_views, require_native_size=True'},
+                'layered_garment_closures_gpu_animation':{'status':'requires_live_fixtures','reason':'available wrappers/docstrings do not establish these end-to-end workflows'},
+                'pressure_stress_sensing':{'status':'unsupported','reason':'mesh analysis supplies geometric evidence only'}},
             'scope':'availability/docstrings only; no feature certification or guessed setter names'}
 
 
@@ -56,9 +63,14 @@ def backup_fabric_presets(output_dir,fabric_indices):
     for index in fabric_indices:
         _integer(index,'fabric_index',maximum=count-1)
         names.append(name(index))
-    scene_names=[name(i) for i in range(count)]
-    if any(not n or scene_names.count(n)!=1 for n in names):
-        raise ValueError('Backup/restore requires unique nonempty fabric names')
+    if any(not isinstance(n,str) or not n for n in names):
+        raise ValueError('Backup requires nonempty fabric names')
+    pattern_name=_function('pattern_api','GetPatternPieceName')
+    assignment=_function('pattern_api','GetPatternPieceFabricIndex')
+    associations={index:[] for index in fabric_indices}
+    for i in range(_function('pattern_api','GetPatternCount')()):
+        if assignment(i) in associations:
+            associations[assignment(i)].append(pattern_name(i))
     os.makedirs(folder,exist_ok=True)
     records=[]
     for number,(index,n) in enumerate(zip(fabric_indices,names)):
@@ -68,8 +80,9 @@ def backup_fabric_presets(output_dir,fabric_indices):
         _verify_files(returned,folder,before,'.zfab')
         if not os.path.isfile(path) or not os.path.getsize(path):
             raise RuntimeError('MD did not create the requested fabric preset')
-        records.append({'name':n,'original_index':index,'path':path,'sha256':_file_hash(path)})
-    manifest={'schema_version':1,'fabrics':records}
+        records.append({'name':n,'original_index':index,'path':path,'sha256':_file_hash(path),
+                        'pattern_names':associations[index]})
+    manifest={'schema_version':2,'fabrics':records}
     manifest_path=os.path.join(folder,'fabric-manifest.json')
     with open(manifest_path,'x',encoding='utf-8') as file:
         json.dump(manifest,file,indent=2)
@@ -77,51 +90,111 @@ def backup_fabric_presets(output_dir,fabric_indices):
             'scope':'MD-native presets retain more fabric state than geometry JSON; physical equivalence still needs inspection'}
 
 
-def _fabric_restore_plan(manifest):
+def _fabric_restore_plan(manifest,fabric_mapping=None):
     recipe_keys(manifest,('schema_version','fabrics'),('schema_version','fabrics'),'fabric manifest')
-    if type(manifest['schema_version']) is not int or manifest['schema_version']!=1 or not isinstance(manifest['fabrics'],list) or not 1<=len(manifest['fabrics'])<=500:
+    version=manifest['schema_version']
+    if type(version) is not int or version not in (1,2) or not isinstance(manifest['fabrics'],list) or not 1<=len(manifest['fabrics'])<=500:
         raise ValueError('Invalid fabric backup manifest')
     count=_function('fabric_api','GetFabricCount')(False)
     name=_function('fabric_api','GetFabricName')
     names=[name(i) for i in range(count)]
     _signature_function('fabric_api','ReplaceFabric','int','str')
+    _signature_function('fabric_api','SetFabricNameW','int','str')
+    if fabric_mapping is not None:
+        if not isinstance(fabric_mapping,dict) or any(not isinstance(k,str) or not k.isdecimal() for k in fabric_mapping):
+            raise ValueError('fabric_mapping must map original index strings to destination indices')
+        for index in fabric_mapping.values():
+            _integer(index,'destination fabric index',maximum=count-1)
+        source_keys={str(record.get('original_index')) for record in manifest['fabrics']}
+        if set(fabric_mapping)!=source_keys:
+            raise ValueError('fabric_mapping must cover exactly the backed-up indices')
+    patterns={}
+    for i in range(_function('pattern_api','GetPatternCount')()):
+        patterns.setdefault(_function('pattern_api','GetPatternPieceName')(i),[]).append(i)
     plan=[]
     seen=set()
     for record in manifest['fabrics']:
-        recipe_keys(record,('name','original_index','path','sha256'),('name','original_index','path','sha256'),'fabric record')
+        keys=('name','original_index','path','sha256')+(('pattern_names',) if version==2 else ())
+        recipe_keys(record,keys,keys,'fabric record')
         n=record['name']
-        if not isinstance(n,str) or n in seen or names.count(n)!=1:
-            raise ValueError('Fabric mapping is missing, duplicate or ambiguous')
-        seen.add(n)
+        original=_integer(record['original_index'],'original fabric index')
+        if not isinstance(n,str) or not n or original in seen:
+            raise ValueError('Fabric record name/index is invalid or repeated')
+        if version==2 and (not isinstance(record['pattern_names'],list) or
+                any(not isinstance(p,str) or not p for p in record['pattern_names'])):
+            raise ValueError('pattern_names must be a list of nonempty strings')
+        seen.add(original)
         path=_path(record['path'],'.zfab',must_exist=True)
         if _file_hash(path)!=record['sha256']:
             raise ValueError('Fabric backup hash changed')
-        plan.append((names.index(n),record))
+        if fabric_mapping is not None:
+            destination=fabric_mapping[str(original)]
+        elif version==2 and record['pattern_names']:
+            associated=record['pattern_names']
+            if (not isinstance(associated,list) or any(not isinstance(p,str) or len(patterns.get(p,[]))!=1 for p in associated)
+                    or len(set(associated))!=len(associated)):
+                raise ValueError('Fabric pattern association is missing or ambiguous')
+            destinations={_function('pattern_api','GetPatternPieceFabricIndex')(patterns[p][0]) for p in associated}
+            if len(destinations)!=1:
+                raise ValueError('Imported fabric split across destinations; provide an explicit fabric_mapping')
+            destination=destinations.pop()
+            _integer(destination,'destination fabric index',maximum=count-1)
+        else:
+            if version==2 and not isinstance(record['pattern_names'],list):
+                raise ValueError('pattern_names must be a list')
+            if names.count(n)!=1:
+                raise ValueError('Fabric mapping is missing or ambiguous; provide an explicit fabric_mapping')
+            destination=names.index(n)
+        if destination in [index for index,_ in plan]:
+            raise ValueError('Multiple original fabrics map to one destination; recovery would overwrite a preset')
+        plan.append((destination,record))
     return plan
 
 
-def _restore_fabric_presets(manifest):
-    plan=_fabric_restore_plan(manifest)
+def _restore_fabric_presets(manifest,fabric_mapping=None):
+    plan=_fabric_restore_plan(manifest,fabric_mapping)
     completed=[]
-    for index,record in plan:
-        result=replace_fabric(index,record['path'])
-        completed.append(result)
-        if not result.get('ok') or result.get('name')!=record['name']:
-            return {'ok':False,'error':'Fabric preset replacement/name verification failed',
-                    'completed':completed,'partial_change_possible':True}
+    assignment=_function('pattern_api','GetPatternPieceFabricIndex')
+    before=[assignment(i) for i in range(_function('pattern_api','GetPatternCount')())]
+    stage='replacement'
+    attempted=False
+    try:
+        for index,record in plan:
+            stage='replacement'
+            attempted=True
+            result=replace_fabric(index,record['path'])
+            completed.append(result)
+            if not result.get('ok'):
+                raise RuntimeError('Native fabric replacement failed')
+            stage='name_restore'
+            _function('fabric_api','SetFabricNameW')(index,record['name'])
+            result['name']=_function('fabric_api','GetFabricName')(index)
+            result['name_restored']=result['name']==record['name']
+            if not result['name_restored']:
+                raise RuntimeError('Fabric name read-back did not match the backup')
+            stage='assignment_verification'
+            if before!=[assignment(i) for i in range(_function('pattern_api','GetPatternCount')())]:
+                raise RuntimeError('Fabric replacement changed pattern assignments')
+    except Exception as exc:
+        return {'ok':False,'error':str(exc),'failed_stage':stage,
+                'completed':completed,'partial_change_possible':attempted}
     return {'ok':True,'completed':completed,'physical_parameters_certified':False,
             'verification':'native preset hashes before restore and MD replacement/name read-back; not physical sensor equivalence'}
 
 
-def restore_fabric_presets(manifest,checkpoint_path):
-    _fabric_restore_plan(manifest)
+def restore_fabric_presets(manifest,checkpoint_path,fabric_mapping=None):
+    _fabric_restore_plan(manifest,fabric_mapping)
     checkpoint=save_checkpoint(checkpoint_path)
     try:
-        result=_restore_fabric_presets(manifest)
+        result=_restore_fabric_presets(manifest,fabric_mapping)
         result['checkpoint']=checkpoint
         return result
     except Exception as exc:
         return {'ok':False,'error':str(exc),'checkpoint':checkpoint,'partial_change_possible':True}
+
+
+class _UnsupportedTranslation(ValueError):
+    pass
 
 
 def _redrape_options(translation=None):
@@ -131,6 +204,8 @@ def _redrape_options(translation=None):
     translation=[recipe_number(v,'translation') for v in translation]
     if any(abs(v)>1000 for v in translation):
         raise ValueError('Translation is bounded to 1000 per axis')
+    if any(v!=0 for v in translation):
+        raise _UnsupportedTranslation('Nonzero redrape translation is unsupported on the validated MD build; use verified avatar arrangement. No native call was made.')
     redrape=_signature_function('utility_api','ReDrape3DArrangement','ImportExportOption')
     refresh=_function('utility_api','Refresh3DWindow')
     option=_function('ApiTypes','ImportExportOption')()
@@ -150,7 +225,12 @@ def redrape_garment(output_dir,translation=None,movement_threshold=0.1,require_m
     recipe_number(movement_threshold,'movement_threshold',True)
     if type(require_movement) is not bool:
         raise ValueError('require_movement must be boolean')
-    redrape,refresh,option,translation=_redrape_options(translation)
+    try:
+        redrape,refresh,option,translation=_redrape_options(translation)
+    except _UnsupportedTranslation as exc:
+        return {'ok':False,'error':str(exc),'code':'unsupported_translation',
+                'checkpoint_created':False,'partial_change_possible':False,
+                'supported_alternative':'arrange_patterns_by_name or arrange_patterns_verified with mesh evidence'}
     checkpoint=create_scene_checkpoint(os.path.join(folder,'before.zprj'))
     with open(os.path.join(folder,'before.checkpoint.json'),'x',encoding='utf-8') as file:
         json.dump(checkpoint['manifest'],file,indent=2)

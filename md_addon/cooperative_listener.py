@@ -16,6 +16,10 @@ _status = {}
 MAX_CLIENTS = 8
 POLL_SECONDS = 0.02
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+RELEASE_UI_EVIDENCE={'release':'0.8.0','date':'2026-10-08','md_version':'2026.0.315',
+                     'platform':'Windows','idle_interaction':'user confirmed normal orbiting and menus',
+                     'protocol_checks_passed':13,'scope':'one host; native calls still synchronous',
+                     'reference':'docs/live-v08-fixes.md'}
 
 
 class WindowsPump:
@@ -105,7 +109,11 @@ def _dispatch(line, legacy):
         if method == 'shutdown':
             return {'id': request_id, 'result': {'bye': True}}, False
         if method in ('ping', 'status'):
-            return {'id': request_id, 'result': {'pong': True, **_status, 'runtime_cache_entries': len(_cache)}}, True
+            health={'message_dispatch_observed':_status.get('dispatched_messages',0)>0,
+                    'interaction_observation':'not sensed by listener',
+                    'native_calls_synchronous':True}
+            return {'id': request_id, 'result': {'pong': True, **_status, 'runtime_cache_entries': len(_cache),
+                                                'ui_pump_health':health,'release_ui_evidence':dict(RELEASE_UI_EVIDENCE)}}, True
         if method != 'execute_operation' and method not in legacy.HANDLERS:
             return {'id': request_id, 'error': 'unknown method: ' + method}, True
         started = time.monotonic()
@@ -128,9 +136,9 @@ def serve_forever(legacy):
     pump = WindowsPump() if os.name == 'nt' and os.environ.get('MD_MCP_UI_PUMP', '1') != '0' else None
     clients = {}
     _status.clear()
-    _status.update(listener_version='0.8.0', listener_id=uuid.uuid4().hex,
+    _status.update(listener_version='0.8.1', listener_id=uuid.uuid4().hex,
                    ui_mode='windows_idle_pump' if pump else 'blocking_compatibility',
-                   ui_pump_live_validated=False, dispatched_messages=0, active_method=None,
+                   dispatched_messages=0, active_method=None,
                    last_operation_seconds=None, cached_runtime_supported=True, idle_poll_seconds=POLL_SECONDS)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:

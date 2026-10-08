@@ -3,7 +3,8 @@
 MD's embedded Python (3.11) does not give CPU to background daemon threads, so
 the old thread-based server never actually bound a socket. Version 0.8 delegates
 to cooperative_listener: nonblocking sockets and Windows message dispatch while
-idle. API calls remain synchronous. Host integration awaits live validation.
+idle. API calls remain synchronous. Idle responsiveness was observed on one
+Windows/MD 2026.0.315 host; this does not establish responsiveness during calls.
 The MCP shutdown_listener tool stops the loop; no operation is automatically replayed.
 
 How to start it (paste into MD's Python Editor, or use scripts/md_start_listener.py):

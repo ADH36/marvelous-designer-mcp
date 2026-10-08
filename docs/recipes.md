@@ -1,3 +1,5 @@
+> Current contracts and validation: [v0.8.1 fixes](live-v08-fixes.md). The release-specific counts and deferred-test notes below are historical.
+
 # Recipes and automation (v0.4)
 
 Version 0.4 adds 16 tools, for 42 total. These tools use the existing Python

@@ -1,3 +1,5 @@
+> Current contracts and validation: [v0.8.1 fixes](live-v08-fixes.md). The release-specific counts and deferred-test notes below are historical.
+
 # Changes informed by the v0.5 live garment test (v0.6)
 
 The MD 2026.0.315 session built and simulated a two-panel skirt and a sleeveless

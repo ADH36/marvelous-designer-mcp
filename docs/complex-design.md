@@ -1,3 +1,5 @@
+> Current contracts and validation: [v0.8.1 fixes](live-v08-fixes.md). The release-specific counts and deferred-test notes below are historical.
+
 # Complex garment controls (v0.5)
 
 Version 0.5 adds 25 tools, bringing the total to **67**. These enable more of the

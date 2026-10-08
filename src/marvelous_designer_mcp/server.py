@@ -17,6 +17,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 
 from . import bridge, operations, recipes, advanced, geometry, native_controls, mesh_analysis, drafting, construction
 from .config import MD_HOST, MD_PORT
+from . import __version__
 
 mcp = FastMCP("marvelous-designer")
 _OPERATION_SOURCE = Path(operations.__file__).read_text(encoding="utf-8")
@@ -160,21 +161,29 @@ def _md_operation(operation: str, *, timeout: float | None = None, **params) -> 
     return outcome
 
 
-def _resize_turntable(outcome: dict, width: int, height: int) -> dict:
+def _resize_turntable(outcome: dict, width: int, height: int, require_native_size: bool = False) -> dict:
     if outcome.get("ok"):
         try:
             render_sizes = []
+            outcome.update(render_sizes=render_sizes,requested_size=[width,height],native_size_verified=False)
             for filename in outcome['files']:
                 with Image.open(filename) as image:
                     if image.format != 'PNG':
                         raise ValueError('MD returned a non-PNG turntable image')
                     render_sizes.append(list(image.size))
+                    if require_native_size and (image.width<width or image.height<height):
+                        raise ValueError('Native capture is smaller than requested; use saved zoomed custom views. Upscaling cannot add detail.')
+            for filename in outcome['files']:
+                with Image.open(filename) as image:
                     if image.size != (width, height):
                         resized = ImageOps.pad(image.convert('RGBA'), (width, height),
                                                method=Image.Resampling.LANCZOS, color=(0, 0, 0, 0))
                         resized.save(filename, format='PNG')
             outcome['render_sizes'] = render_sizes
             outcome['output_size'] = [width, height]
+            outcome['native_size_verified']=all(w>=width and h>=height for w,h in render_sizes)
+            outcome['resampled']=any(size!=[width,height] for size in render_sizes)
+            outcome['detail_added_by_resampling']=False
         except (OSError, ValueError, Image.DecompressionBombError) as exc:
             outcome['ok'] = False
             outcome['error'] = 'Preview image processing failed: ' + str(exc)
@@ -249,9 +258,10 @@ def list_patterns() -> dict:
 def list_fabrics() -> dict:
     """List fabrics in the current scene: index and name (plus the fabric-style name list)."""
     return _md_exec(
-        "import fabric_api\n"
+        "import fabric_api, pattern_api\n"
         "result = {\n"
-        "    'fabrics': [{'index': i, 'name': fabric_api.GetFabricName(i)} for i in range(fabric_api.GetFabricCount(True))],\n"
+        "    'fabrics': [{'index': i, 'name': fabric_api.GetFabricName(i)} for i in range(fabric_api.GetFabricCount(False))],\n"
+        "    'used_assignments': [{'pattern_index': i, 'fabric_index': pattern_api.GetPatternPieceFabricIndex(i)} for i in range(pattern_api.GetPatternCount())],\n"
         "    'styles': fabric_api.GetFabricStyleNameList(),\n"
         "}\n"
     )
@@ -480,16 +490,19 @@ def export_obj(path: str, scale: float = 1.0, thin: bool = True, single_object: 
 
 @mcp.tool()
 def export_turntable_images(path: str, image_count: int = 4, width: int = 1024, height: int = 1024,
-                            start_index: int = 0, overwrite: bool = False, timeout: float = 120.0) -> dict:
+                            start_index: int = 0, overwrite: bool = False, timeout: float = 120.0,
+                            require_native_size: bool = False) -> dict:
     """Export 1–72 evenly spaced turntable images using an absolute PNG path prefix.
 
     Uses the current scene/colorway and view settings. Verifies files were written.
     Use preview_garment to return image content directly to the MCP client.
     """
+    if type(require_native_size) is not bool:
+        return {'ok':False,'error':'require_native_size must be boolean'}
     outcome = _md_operation("export_turntable_images", timeout=timeout, path=path,
                             image_count=image_count, width=width, height=height,
                             start_index=start_index, overwrite=overwrite)
-    return _resize_turntable(outcome, width, height)
+    return _resize_turntable(outcome, width, height,require_native_size)
 
 
 @mcp.tool()
@@ -506,21 +519,31 @@ def export_custom_views(output_dir: str, width: int = 1024, height: int = 1024,
 
 @mcp.tool()
 def preview_garment(output_dir: str, image_count: int = 4, width: int = 1024, height: int = 1024,
-                    prefix: str = "preview", overwrite: bool = False, timeout: float = 120.0) -> CallToolResult:
-    """Generate up to 8 turntable views and return PNG image content to the agent.
+                    prefix: str = "preview", overwrite: bool = False, timeout: float = 120.0,
+                    capture_mode: Literal['turntable','custom_views'] = 'turntable',
+                    require_native_size: bool = False) -> CallToolResult:
+    """Return up to 8 turntable or saved custom-view PNGs with native resolution evidence.
 
     Use an absolute output directory and a new filename prefix. Dimensions are
     limited to 2048 for MCP previews. Uses current camera/render settings.
     Exported images remain on disk; unsupported/oversized images report an error.
+    custom_views uses views already saved/zoomed in MD. require_native_size rejects
+    undersized captures before resampling. Upscaling/cropping adds no new detail.
     """
+    if capture_mode not in ('turntable','custom_views') or type(require_native_size) is not bool:
+        return _fit_error({'ok':False,'error':'Invalid capture_mode or require_native_size'})
     if (type(image_count) is not int or not 1 <= image_count <= 8 or
             type(width) is not int or type(height) is not int or
             not 64 <= width <= 2048 or not 64 <= height <= 2048 or
             not prefix or any(c in prefix for c in '/\\\x00') or prefix in (".", "..")):
         outcome = {"ok": False, "error": "Preview requires 1–8 images, dimensions 64–2048, and a filename prefix"}
+    elif capture_mode=='custom_views':
+        outcome=export_custom_views(output_dir,width,height,prefix,overwrite,timeout)
+        outcome=_resize_turntable(outcome,width,height,require_native_size)
     else:
         outcome = export_turntable_images(str(Path(output_dir) / (prefix + ".png")), image_count,
-                                           width, height, 0, overwrite, timeout)
+                                           width, height, 0, overwrite, timeout,require_native_size)
+    outcome['capture_mode']=capture_mode
     content = []
     if outcome.get("ok"):
         try:
@@ -1004,22 +1027,47 @@ def inspect_native_pattern_geometry(pattern_index: int, export_path: str) -> dic
 def listener_status() -> dict:
     """Read listener version, idle UI mode, runtime cache and last call timing without native API calls."""
     def status():
-        result = bridge.call('ping')
+        try:
+            result = bridge.call('ping')
+        except bridge.BridgeError as exc:
+            return {'ok':False,'error':str(exc),'listener_available':False,
+                    'server_version':__version__,'partial_change_possible':False,
+                    'next_step':'Start the registered MD listener plugin, then reconnect the MCP client'}
         if not isinstance(result,dict):
             raise ValueError('Listener returned no status object')
         return {'ok':True,'listener':result,
-                'restart_required_for_v08':result.get('listener_version')!='0.8.0',
-                'scope':'listener status only; responsiveness and garment quality are not verified'}
+                'server_version':__version__,'tool_count':len(mcp._tool_manager.list_tools()),
+                'listener_restart_required':result.get('listener_version')!=__version__,
+                'restart_required_for_v08':not result.get('cached_runtime_supported',False),
+                'ui_pump_health':result.get('ui_pump_health',{
+                    'message_dispatch_observed':result.get('dispatched_messages',0)>0,
+                    'interaction_observation':'not sensed by listener','native_calls_synchronous':True}),
+                'release_ui_evidence':{
+                    'release':'0.8.0','date':'2026-10-08','md_version':'2026.0.315','platform':'Windows',
+                    'idle_interaction':'user confirmed normal orbiting and menus','protocol_checks_passed':13,
+                    'reference':'docs/live-v08-fixes.md','scope':'one host; native calls still synchronous'},
+                'scope':'runtime health and separate host-specific release evidence; no universal responsiveness or fit certification'}
     return _local_call(status)
 
 
 @mcp.tool()
 def analyze_surface_intersections(garment_path: str, other_path: str = '', epsilon: float = 0.000001,
                                    max_candidates: int = 500000, time_budget_seconds: float = 30.0,
-                                   report_path: str = '') -> dict:
-    """Check triangle intersections/touching using local BVHs; optional second mesh or self-check."""
-    return _local_call(lambda:_save_analysis(mesh_analysis.analyze_intersections(
-        garment_path,other_path,epsilon,max_candidates,time_budget_seconds),report_path))
+                                   report_path: str = '', known_seam_triangle_pairs: list[list[int]] | None = None,
+                                   body_regions: list[dict] | None = None, review_output_dir: str = '') -> dict:
+    """Classify crossings, coplanar overlaps and contacts with provenance and optional SVG closeups.
+
+    Known seam triangle pairs refer to this exact export and suppress only contacts.
+    Body regions are caller supplied {name,min:[x,y,z],max:[x,y,z]} bounds.
+    Incomplete scans never establish a clean result. SVGs are geometry projections.
+    """
+    def analyze():
+        result=mesh_analysis.analyze_intersections(garment_path,other_path,epsilon,max_candidates,
+                                                  time_budget_seconds,known_seam_triangle_pairs,body_regions)
+        if review_output_dir:
+            result['review_views']=mesh_analysis.export_intersection_review(result,review_output_dir)
+        return _save_analysis(result,report_path)
+    return _local_call(analyze)
 
 
 @mcp.tool()
@@ -1080,7 +1128,8 @@ def redrape_garment(output_dir: str, translation: list[float] | None = None,
 
     Uses the installed ReDrape3DArrangement option signature captured in the live
     session. This may reset drape; it is not a per-pattern rigid transform. Bounds
-    translation to 1000 native units per axis and never retries unchanged output.
+    Nonzero translation is unsupported on the validated MD build and is rejected
+    before checkpoint/native calls. Use verified avatar arrangement for placement.
     """
     return _md_operation('redrape_garment',output_dir=output_dir,translation=translation,
                          movement_threshold=movement_threshold,require_movement=require_movement)
@@ -1088,15 +1137,21 @@ def redrape_garment(output_dir: str, translation: list[float] | None = None,
 
 @mcp.tool()
 def backup_fabric_presets(output_dir: str, fabric_indices: list[int]) -> dict:
-    """Export native fabric presets with unique names and SHA-256 recovery manifests."""
+    """Export native fabric presets with pattern associations and SHA-256 recovery manifests."""
     return _md_operation('backup_fabric_presets',output_dir=output_dir,fabric_indices=fabric_indices)
 
 
 @mcp.tool()
-def restore_fabric_presets(manifest_path: str, checkpoint_path: str) -> dict:
-    """Verify preset backup hashes, checkpoint and restore uniquely named existing fabrics."""
+def restore_fabric_presets(manifest_path: str, checkpoint_path: str,
+                          fabric_mapping: dict[str, int] | None = None) -> dict:
+    """Verify preset hashes, checkpoint and restore names/assignments with unambiguous mappings.
+
+    Version 2 manifests record pattern associations. fabric_mapping explicitly maps
+    original index strings to destination indices for legacy or unused fabrics.
+    """
     return _local_call(lambda: _md_operation('restore_fabric_presets',
-                                            manifest=_read_json(manifest_path),checkpoint_path=checkpoint_path))
+                                            manifest=_read_json(manifest_path),checkpoint_path=checkpoint_path,
+                                            fabric_mapping=fabric_mapping))
 
 
 @mcp.tool()
@@ -1317,9 +1372,15 @@ def create_fit_closeups(report_path: str, output_dir: str, regions: list[dict], 
                 cropped=ImageOps.contain(original.crop(pixel_box).convert('RGB'),(output_size,output_size))
                 path=folder/f'closeup_{number:03d}.png'
                 cropped.save(path)
-            crops.append({'name':name,'source':str(source),'view_index':index,'box':box,'path':str(path)})
+            native_sizes=report['preview'].get('render_sizes',[])
+            crops.append({'name':name,'source':str(source),'view_index':index,'box':box,'path':str(path),
+                          'source_size':[w,h],'source_native_size':native_sizes[index] if index<len(native_sizes) else None,
+                          'crop_size':[pixel_box[2]-pixel_box[0],pixel_box[3]-pixel_box[1]],
+                          'output_size':list(cropped.size),'detail_added':False})
             images.append(ImageContent(type='image',data=base64.b64encode(path.read_bytes()).decode(),mimeType='image/png'))
-        outcome={'ok':True,'regions':crops,'fit_certified':False,'region_source':'caller selected'}
+        outcome={'ok':True,'regions':crops,'fit_certified':False,'region_source':'caller selected',
+                 'capture_kind':'crop of saved capture; no new native detail',
+                 'next_detail_capture':'preview_garment(capture_mode="custom_views", require_native_size=True) using saved zoomed MD views'}
         _write_json(str(folder/'closeups.json'),outcome)
         return CallToolResult(content=[TextContent(type='text',text=json.dumps(outcome)),*images])
     except (OSError,ValueError,TypeError,KeyError,Image.DecompressionBombError) as exc:
@@ -1454,17 +1515,58 @@ def _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path,check_surf
     outcome['native_fit_sensors']=False
 
 
-def _fit_result(outcome, folder, observations, preview_count):
+def _fit_preview_inputs(preview_width,preview_height,preview_capture_mode,require_native_size):
+    operations._integer(preview_width,'preview_width',minimum=64,maximum=2048)
+    operations._integer(preview_height,'preview_height',minimum=64,maximum=2048)
+    if preview_capture_mode not in ('turntable','custom_views') or type(require_native_size) is not bool:
+        raise ValueError('Invalid preview_capture_mode or require_native_size')
+
+
+def _summarize_fit_review(outcome):
+    diagnostics=outcome.get('geometric_diagnostics',{})
+    findings=[]
+    incomplete=[]
+    limits=[]
+    if not outcome.get('ok'):
+        incomplete.append('capture or native operation failed')
+    if not outcome.get('measurements',{}).get('passes',True):
+        findings.append('2D measurement targets outside supplied tolerances')
+    if not outcome.get('sewing',{}).get('passes',True):
+        findings.append('supplied sewing diagnostics need review')
+    for name,record in diagnostics.items():
+        if not record.get('ok') or record.get('analysis_complete') is False:
+            incomplete.append(name)
+        if record.get('intersecting_or_touching_pairs',0) or record.get('edges_over_limit',0):
+            findings.append(name)
+        counts=record.get('classification_counts',{})
+        if counts.get('inside_candidate',0) or counts.get('near_surface',0):
+            findings.append(name)
+        if name=='clearance':
+            if not record.get('all_garment_vertices_sampled'):
+                limits.append('clearance samples vertices and can miss triangle interior crossings')
+            if not record.get('avatar_closed_manifold_by_edge_count'):
+                limits.append('open/nonmanifold avatar: unsigned clearance only')
+    status=('incomplete' if incomplete else 'needs_review' if findings or limits else
+            'no_findings_in_checked_scope' if diagnostics else 'not_assessed')
+    outcome.update(review_status=status,diagnostics_complete=bool(diagnostics) and not incomplete,
+                   review_findings=findings,review_incomplete=incomplete,review_limits=limits,
+                   fit_certified=False,native_fit_sensors=False)
+
+
+def _fit_result(outcome, folder, observations, preview_count,preview_width=1024,preview_height=1024,
+                preview_capture_mode='turntable',require_native_size=False):
     outcome.update(observations=observations, observations_source='caller supplied; not sensor measurements',
                    fit_certified=False, scope='images, mesh bounds and 2D edge measurements; inspect 3D fit, wrinkles and collisions visually')
     images = []
     if outcome.get('ok'):
         folder.mkdir(parents=True, exist_ok=True)
-        preview = preview_garment(str(folder), image_count=preview_count, width=1024, height=1024)
+        preview = preview_garment(str(folder), image_count=preview_count, width=preview_width,height=preview_height,
+                                  capture_mode=preview_capture_mode,require_native_size=require_native_size)
         preview_status = json.loads(preview.content[0].text)
         outcome['preview'] = preview_status
         outcome['ok'] = preview_status.get('ok', False)
         images = [item for item in preview.content if isinstance(item, ImageContent)]
+    _summarize_fit_review(outcome)
     if folder.is_dir():
         _attach_report(outcome, str(folder / 'fit-report.json'))
     return CallToolResult(content=[TextContent(type='text', text=json.dumps(outcome, ensure_ascii=False)), *images],
@@ -1480,7 +1582,9 @@ def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: lis
                        seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
                        preview_count: int = 4, capture_mesh: bool = True,
                        avatar_mesh_path: str = '', rest_mesh_path: str = '',
-                       check_surface_intersections: bool = False) -> CallToolResult:
+                       check_surface_intersections: bool = False, preview_width: int = 1024, preview_height: int = 1024,
+                       preview_capture_mode: Literal['turntable','custom_views'] = 'turntable',
+                       require_native_size: bool = False) -> CallToolResult:
     """Return garment images, edge target comparisons, seam diagnostics and a saved fit report.
 
     Does not simulate. Observations are caller supplied; no automated body collision,
@@ -1491,6 +1595,7 @@ def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: lis
     """
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
+        _fit_preview_inputs(preview_width,preview_height,preview_capture_mode,require_native_size)
         _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
         outcome = _fit_measurements(pattern_indices, targets, seam_pairs)
         if capture_mesh and outcome.get('ok'):
@@ -1498,7 +1603,8 @@ def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: lis
             outcome['mesh'] = mesh
             outcome['ok'] = mesh.get('ok',False)
             _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
-        return _fit_result(outcome, folder, observations, preview_count)
+        return _fit_result(outcome, folder, observations, preview_count,preview_width,preview_height,
+                           preview_capture_mode,require_native_size)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return _fit_error({'ok': False, 'error': str(exc)})
 
@@ -1518,7 +1624,10 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                      seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
                      preview_count: int = 4, timeout: float = 300.0,
                      capture_mesh: bool = True, avatar_mesh_path: str = '',
-                     rest_mesh_path: str = '', check_surface_intersections: bool = False) -> CallToolResult:
+                     rest_mesh_path: str = '', check_surface_intersections: bool = False,
+                     preview_width: int = 1024, preview_height: int = 1024,
+                     preview_capture_mode: Literal['turntable','custom_views'] = 'turntable',
+                     require_native_size: bool = False) -> CallToolResult:
     """Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report.
 
     steps is the native Simulate(int) argument, limited to 1–200. Quality 0 normal,
@@ -1528,6 +1637,7 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
     outcome = {'ok': False}
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
+        _fit_preview_inputs(preview_width,preview_height,preview_capture_mode,require_native_size)
         _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
         preflight = _fit_measurements(pattern_indices, targets, seam_pairs)
         if not preflight['ok']:
@@ -1550,7 +1660,8 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                 if after_mesh.get('ok'):
                     outcome['mesh_comparison']=geometry.compare_meshes(before_mesh['metrics']['path'],after_mesh['metrics']['path'])
                     _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path,check_surface_intersections)
-        return _fit_result(outcome, folder, observations, preview_count)
+        return _fit_result(outcome, folder, observations, preview_count,preview_width,preview_height,
+                           preview_capture_mode,require_native_size)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         outcome.update(ok=False, error=str(exc))
         return _fit_error(outcome)
@@ -1644,24 +1755,34 @@ def read_operation_journal(path: str, limit: int = 100) -> dict:
         if source.stat().st_size>10*1024*1024:
             raise ValueError('Journal exceeds 10 MiB; archive older events')
         entries={}
+        def outcome(error=None):
+            result=[dict(entry) for entry in list(entries.values())[-limit:]]
+            for entry in result:
+                if entry.get('status')=='started':
+                    entry.update(status='uncertain',reason='No persisted completion record; inspect MD/checkpoints before further mutation')
+            response={'ok':error is None,'journal_path':str(source),'operations':result,
+                      'requires_state_inspection':error is not None or any(e.get('status')=='uncertain' for e in result),
+                      'automatic_replay':False}
+            if error:
+                response.update(error=error,parsed_operations=result,complete_operations=result,
+                                complete_operations_scope='legacy alias for parsed operations; does not mean completed execution')
+            return response
         with source.open(encoding='utf-8') as file:
             for line in file:
                 if len(line)>16384:
-                    raise ValueError('Journal event exceeds 16 KiB')
+                    return outcome('Journal event exceeds 16 KiB')
                 try:
                     event=json.loads(line)
                 except json.JSONDecodeError:
                     # A torn final append is diagnostic evidence, not a replay instruction.
-                    return {'ok':False,'error':'Journal contains an incomplete/invalid event',
-                            'complete_operations':list(entries.values())[-limit:],'requires_state_inspection':True}
-                if not isinstance(event,dict) or not isinstance(event.get('operation_id'),str):
-                    raise ValueError('Invalid operation event')
+                    return outcome('Journal contains an incomplete/invalid event')
+                if (not isinstance(event,dict) or not isinstance(event.get('operation_id'),str) or not event['operation_id']
+                        or event.get('status') not in ('started','completed','failed','uncertain')):
+                    return outcome('Invalid operation event')
                 entries[event['operation_id']]=event
-        result=list(entries.values())[-limit:]
-        for entry in result:
-            if entry.get('status')=='started':
-                entry.update(status='uncertain',reason='No persisted completion record; inspect MD/checkpoints before further mutation')
-        return {'ok':True,'journal_path':str(source),'operations':result,
-                'requires_state_inspection':any(e.get('status')=='uncertain' for e in result),
-                'automatic_replay':False}
-    return _local_call(read)
+        return outcome()
+    result=_local_call(read)
+    result.setdefault('automatic_replay',False)
+    if not result.get('ok'):
+        result.setdefault('requires_state_inspection',True)
+    return result

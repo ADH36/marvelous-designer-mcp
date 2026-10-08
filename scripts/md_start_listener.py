@@ -11,7 +11,8 @@ Two ways to use this file:
 
 Either way it starts a listener on 127.0.0.1:7421. Version 0.8 dispatches
 Windows GUI messages while idle; native calls remain synchronous and can pause
-the UI. This host integration awaits live validation. Stop through shutdown_listener.
+the UI. Idle responsiveness was observed on Windows/MD 2026.0.315; other hosts
+need their own validation. Stop through shutdown_listener.
 
 Re-running picks up edits to md_listener.py (the module is reloaded), so you do
 not need to restart MD after changing it.

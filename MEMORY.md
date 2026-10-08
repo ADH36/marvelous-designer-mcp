@@ -1,24 +1,44 @@
-# Current handoff: v0.8.0 (2026-10-08)
+# Current handoff: v0.8.1 (2026-10-08)
 
-97 tools; complete catalog in README. See docs/ui-and-construction.md.
-User requested NO TESTS for v0.6/v0.7/v0.8. No live MD calls/scene changes in these
-updates. Latest live evidence: v0.5 skirt/top prototypes (42/67 tools exercised).
+97 tools; source-generated README catalog. See docs/live-v08-fixes.md for current
+contracts and evidence; older release notes below are historical.
+The user authorized live testing after the initial no-test releases. v0.8 live
+testing exercised 54/97 names (all 30 added names called), confirmed normal idle
+UI response and passed 13 real protocol checks. Three workflows failed.
 
-md_listener.serve_forever delegates to cooperative_listener: nonblocking sockets
-and experimental idle Windows message dispatch through ctypes. Native calls remain
-synchronous. Stop the old listener and click the existing registered launcher
-again to activate; reconnect Codex/Hermes MCP servers afterward. No auto-activation.
-MD_MCP_UI_PUMP=0 belongs to MD's environment and selects idle-blocking fallback.
-SHA-keyed runtime cache is isolated from raw Python calls. Cache retry requires
-executed=false; old-listener fallback requires exact unknown-method error.
-I/O failures are uncertain and never automatically replayed.
+v0.8.1 maps imported fabric groups through actual unique-pattern assignments,
+backs up v2 fabric manifests with associations, restores preset display names
+through verified SetFabricNameW and reads back unchanged assignments. Split or
+collapsed groups fail safely with checkpoint/stage evidence. Global list_fabrics
+uses GetFabricCount(False). JSON/preset fixes passed live on the saved dart/sleeve
+fixture with 15 mm resolution, layer 1, solidify and sewing preserved. Starting
+empty scene restored and same v0.8 listener left running.
 
-New local construction: triangle intersection checks, matched segmented sleeve
-caps, affine size variants, scaled SVG, reference migration proposals and supplied
-design evidence review. listener_status reads metadata without native API calls.
-Native per-piece 3D transforms/accessory creation/pressure sensing remain unsupported.
-Full colorway/cache/physical equivalence remain unverified. fit_certified=false.
-Untracked .github/ predates development; do not incidentally include it.
+Nonzero redrape offsets now reject before mutation; native rigid 3D translation
+is unsupported. Geometric reports classify crossing/coplanar/contact, suppress
+only ordinary adjacent or caller-declared sewn contacts, retain provenance and
+offer hashed SVG pair closeups. Fit review status is separate from operation ok.
+Saved custom-view captures support strict native dimensions; crops add no detail.
+Malformed journals normalize unfinished starts and never replay operations.
+
+Tests run actual cached and legacy runtime transports, with current native fakes,
+and dedicated recovery/geometry/capture/journal regressions. See the task's
+outputs/md-v081-fixes for exact test counts and fresh evidence.
+
+Codex/Hermes use the same editable repo venv; the MD registered launcher also
+points here. Reconnect MCP clients for updated source/schemas. The running v0.8
+listener needs stop/relaunch to load v0.8.1 status metadata; core SHA-keyed native
+operations already ran the patched runtime during the targeted live check.
+A later probe found MD no longer running/listener refused; exit cause unknown.
+Start MD/plugin to load the v0.8.1 listener. No destructive restart. Native calls
+remain synchronous; I/O loss is
+uncertain. Cache reinstall requires executed=false; fallback requires exact
+unknown-method error. No mutation replay.
+
+Native closures/grading/pressure/rigid transforms remain unsupported. Full sleeve,
+lining, zipper, GPU, animation/destination and physical/colorway/cache workflows
+need live fixtures. Do not claim production fit. Untracked .github/ predates this
+work; do not include it incidentally.
 
 ---
 

@@ -180,11 +180,22 @@ def import_pattern_json(path,checkpoint_path,preserve_settings=True,preserve_fab
     if type(preserve_fabric_presets) is not bool:
         raise ValueError('preserve_fabric_presets must be boolean')
     settings = _capture_import_settings(document) if preserve_settings else []
+    if preserve_settings and preserve_fabric_presets and settings:
+        if globals().get('__package__') == 'marvelous_designer_mcp':
+            from .native_controls import _signature_function as signature
+        else:
+            signature=_signature_function
+        for method,tokens in (('ExportZFabW',('str','int')),('ReplaceFabric',('int','str')),('SetFabricNameW',('int','str'))):
+            signature('fabric_api',method,*tokens)
     settings_path=_path(checkpoint_path,'.zprj')+'.settings.json'
     if preserve_settings and os.path.exists(settings_path):
         raise ValueError('Settings recovery file already exists; choose a fresh checkpoint path')
     checkpoint=save_checkpoint(checkpoint_path)
     fabric_backup=None
+    fabrics_restored=None
+    restored=[]
+    mapping=None
+    stage='fabric_backup'
     scene_mutated=False
     try:
         if preserve_settings and preserve_fabric_presets and settings:
@@ -198,25 +209,33 @@ def import_pattern_json(path,checkpoint_path,preserve_settings=True,preserve_fab
         if preserve_settings:
             with open(settings_path,'x',encoding='utf-8') as file:
                 json.dump({'settings':settings,'fabric_backup':fabric_backup,'scope':'known properties and optional native fabric presets'},file,indent=2)
+        stage='native_import'
         scene_mutated=True
         success=bool(fn(path))
         if not success:
             raise RuntimeError('MD rejected native JSON import; scene may have changed')
-        fabrics_restored=restore_fn(fabric_backup['manifest']) if fabric_backup else None
+        stage='fabric_mapping'
+        mapping=_import_fabric_mapping(settings) if preserve_settings else None
+        stage='fabric_presets'
+        fabrics_restored=restore_fn(fabric_backup['manifest'],mapping) if fabric_backup else None
         if fabrics_restored and not fabrics_restored.get('ok'):
             raise RuntimeError('Native fabric recovery failed; use the project checkpoint')
-        restored = _restore_import_settings(settings) if preserve_settings else []
+        stage='pattern_settings'
+        if preserve_settings:
+            _restore_import_settings(settings,mapping,restored)
         return {'ok':success,'checkpoint':checkpoint,'pattern_count':_function('pattern_api','GetPatternCount')(),
                 'partial_change_possible':not success,
                 'refresh_indices':True,'restored_settings':restored,'preserve_settings':preserve_settings,
                 'settings_recovery_path':settings_path if preserve_settings else None,
                 'fabric_backup':fabric_backup,'fabric_recovery':fabrics_restored,
+                'fabric_mapping':mapping,'completed_stage':'pattern_settings',
                 'full_state_preserved':False,
                 'unverified_state':['physical equivalence after preset restore','colorways','freeze','strengthen','simulation cache'],
                 'verification':'known settings reapplied/read back by unique names; inspect geometry and rebind references'}
     except Exception as exc:
         return {'ok':False,'error':str(exc),'checkpoint':checkpoint,'partial_change_possible':scene_mutated,
-                'fabric_backup':fabric_backup,
+                'failed_stage':stage,'restored_settings':restored,'fabric_mapping':mapping,
+                'fabric_backup':fabric_backup,'fabric_recovery':fabrics_restored,
                 'settings_recovery_path':settings_path if preserve_settings else None}
 
 
@@ -253,30 +272,52 @@ def _capture_import_settings(document):
     return states
 
 
-def _restore_import_settings(states):
+def _import_fabric_mapping(states):
+    """Resolve destinations by unique pattern names and their actual imported assignments.
+
+    Native IDs/names of fabrics may change on import; index persistence is never
+    assumed. Split/collapsed original groups require explicit recovery.
+    """
     from collections import defaultdict
-    patterns, fabrics=defaultdict(list),defaultdict(list)
+    patterns=defaultdict(list)
     for i in range(_function('pattern_api','GetPatternCount')()):
         patterns[_function('pattern_api','GetPatternPieceName')(i)].append(i)
-    for i in range(_function('fabric_api','GetFabricCount')(False)):
-        fabrics[_function('fabric_api','GetFabricName')(i)].append(i)
-    planned=[]
     if len(states)!=sum(len(v) for v in patterns.values()):
         raise RuntimeError('Imported pattern count changed; use the checkpoint to recover')
+    mapping={}
+    count=_function('fabric_api','GetFabricCount')(False)
     for state in states:
-        if len(patterns[state['name']])!=1 or len(fabrics[state['fabric_name']])!=1:
-            raise RuntimeError('Pattern/fabric name mapping became missing or ambiguous; recover the checkpoint')
-        planned.append((state,patterns[state['name']][0],fabrics[state['fabric_name']][0]))
-    completed=[]
+        if len(patterns[state['name']])!=1:
+            raise RuntimeError('Pattern name mapping became missing or ambiguous; recover the checkpoint')
+        source=str(state['original_fabric_index'])
+        destination=_function('pattern_api','GetPatternPieceFabricIndex')(patterns[state['name']][0])
+        _integer(destination,'destination fabric index',maximum=count-1)
+        if source in mapping and mapping[source]!=destination:
+            raise RuntimeError('Native import split an original fabric group; recover the checkpoint or supply an explicit preset mapping')
+        if source not in mapping and destination in mapping.values():
+            raise RuntimeError('Native import collapsed different original fabrics; recover the checkpoint before restoring settings')
+        mapping[source]=destination
+    return mapping
+
+
+def _restore_import_settings(states,fabric_mapping=None,completed=None):
+    mapping=_import_fabric_mapping(states) if fabric_mapping is None else fabric_mapping
+    names=[_function('pattern_api','GetPatternPieceName')(i) for i in range(_function('pattern_api','GetPatternCount')())]
+    planned=[(state,names.index(state['name']),mapping[str(state['original_fabric_index'])]) for state in states]
+    completed=[] if completed is None else completed
     for state,index,fabric_index in planned:
-        actions=(lambda:set_pattern_resolution([index],state['particle_distance'],state['mesh_type']),
-                 lambda:set_pattern_layers([index],state['layer']),
-                 lambda:set_pattern_constraints([index],solidify=state['solidify']),
-                 lambda:assign_fabric_batch(fabric_index,[index],assignment_mode=1))
-        for action in actions:
-            if not action().get('ok'):
+        record={'index':index,**state,'fabric_index':fabric_index,'completed_actions':[],'readback_verified':False}
+        completed.append(record)
+        actions=(('resolution',lambda:set_pattern_resolution([index],state['particle_distance'],state['mesh_type'])),
+                 ('layer',lambda:set_pattern_layers([index],state['layer'])),
+                 ('solidify',lambda:set_pattern_constraints([index],solidify=state['solidify'])),
+                 ('fabric',lambda:assign_fabric_batch(fabric_index,[index],assignment_mode=1)))
+        for name,action in actions:
+            outcome=action()
+            record['completed_actions'].append({'action':name,'result':outcome})
+            if not outcome.get('ok'):
                 raise RuntimeError('Imported settings read-back failed; recover the checkpoint')
-        completed.append({'index':index,**state,'fabric_index':fabric_index,'readback_verified':True})
+        record['readback_verified']=True
     return completed
 
 

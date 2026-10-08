@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from test_design_tools import DesignMD, server
+from md_transport import install_transport
 from marvelous_designer_mcp import advanced, operations as ops
 
 
@@ -40,6 +41,20 @@ class AdvancedMD(DesignMD):
         self.pattern.ImportPatternJSON = self.import_json
         self.modules['utility_api'].SetSimulationQuality = self.set_quality
         self.modules['utility_api'].GetSimulationQuality = lambda: self.quality
+        self.fabric.ExportZFabW=self.export_preset
+        self.fabric.SetFabricNameW=self.set_fabric_name
+        # Match installed pybind docstrings; availability alone is not a signature.
+        AdvancedMD.export_preset.__doc__='ExportZFabW(arg0: str, arg1: int) -> str'
+        AdvancedMD.replace.__doc__='ReplaceFabric(arg0: int, arg1: str) -> bool'
+        AdvancedMD.set_fabric_name.__doc__='SetFabricNameW(arg0: int, arg1: str) -> None'
+
+    def export_preset(self,path,index):
+        self.events.append(('export_preset',index))
+        Path(path).write_bytes(('preset '+str(index)).encode())
+        return path
+
+    def set_fabric_name(self,index,name):
+        self.fabric_names[index]=name
 
     def create_internal(self, index, points, closed):
         self.events.append(('internal',index,points,closed))
@@ -66,12 +81,17 @@ class AdvancedMD(DesignMD):
         self.quality = [quality,mode]
 
     def export_json(self, path):
-        Path(path).write_text(json.dumps({'Patterns': [{'Name':n} for n in self.names]}))
+        Path(path).write_text(json.dumps({'PatternList': [{'Name':n} for n in self.names]}))
         return True
 
     def import_json(self, path):
         self.events.append(('import_json',path))
-        self.create([(0,0,0),(20,0,0),(0,20,0)])
+        self.names=[p['Name'] for p in json.loads(Path(path).read_text())['PatternList']]
+        self.distances=[20.0]*len(self.names)
+        self.layers={}
+        self.solidified={}
+        self.fabric_names.append(self.fabric_names[0])
+        self.fabrics=[len(self.fabric_names)-1]*len(self.names)
         return True
 
     def checkpoint(self, path, thumbnail):
@@ -154,7 +174,10 @@ class AdvancedOperationsTests(unittest.TestCase):
         self.assertFalse(self.call('export_pattern_json',path=path)['ok'])
         result=self.call('import_pattern_json',path=path,checkpoint_path=str(self.root/'before.zprj'))
         self.assertTrue(result['ok'])
-        self.assertEqual([x[0] for x in self.md.events[:2]],['checkpoint','import_json'])
+        events=[x[0] for x in self.md.events]
+        self.assertLess(events.index('checkpoint'),events.index('import_json'))
+        self.assertLess(events.index('export_preset'),events.index('import_json'))
+        self.assertTrue(all(p['readback_verified'] for p in result['restored_settings']))
 
     def test_recipe_json_is_not_native_geometry(self):
         path=self.root/'recipe.json'
@@ -287,13 +310,7 @@ class AdvancedOperationsTests(unittest.TestCase):
 class AdvancedServerTests(unittest.TestCase):
     def setUp(self):
         AdvancedOperationsTests.setUp(self)
-        self.namespace={}
-        def execute(method,params,*,timeout=None):
-            exec(params['code'],self.namespace)
-            return {'result':self.namespace['result'],'error':None}
-        patcher=patch.object(server.bridge,'call',side_effect=execute)
-        self.bridge_mock=patcher.start()
-        self.addCleanup(patcher.stop)
+        install_transport(self,server)
         with server._history_lock:
             server._history.clear()
 

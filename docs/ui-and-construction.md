@@ -1,7 +1,8 @@
 # v0.8: idle UI responsiveness and complex construction support
 
-Version 0.8.0 exposes **97 MCP tools**, including seven new tools. Tests and live
-MD calls were not run, as requested. The running MD listener/scene was untouched.
+Version 0.8.1 exposes **97 MCP tools**. Initial v0.8 implementation deferred tests;
+subsequent authorized live testing confirmed idle responsiveness and exercised
+54 tool names. See [current fixes and evidence](live-v08-fixes.md).
 
 ## UI lag implementation
 
@@ -45,10 +46,11 @@ requests within one server process before sending them.
    checkout and reloads both listener modules.
 4. Reconnect/restart the Codex and Hermes MCP server connections.
 5. When live checking is authorized, `listener_status` should report version
-   `0.8.0` and `ui_mode=windows_idle_pump`. Metadata is not proof of usable host
-   interaction; `ui_pump_live_validated` remains false in this release.
+   `0.8.1` and `ui_mode=windows_idle_pump`. Runtime dispatch health is separate
+   from host-specific release evidence; neither certifies interaction during calls.
 
-These steps were **not executed** during this update. Set `MD_MCP_UI_PUMP=0` in
+The v0.8 listener was started for the live report. The v0.8.1 targeted recovery
+check left it running; restart it to load updated listener metadata. Set `MD_MCP_UI_PUMP=0` in
 MD's environment before listener restart for compatibility mode. This variable
 belongs to MD, not the Codex/Hermes server environment. The original loop remains
 available as `serve_blocking_legacy()` for troubleshooting.
@@ -68,9 +70,10 @@ available as `serve_blocking_legacy()` for troubleshooting.
 ## Triangle checks and fit reports
 
 Require triangulated OBJs in identical coordinates/units. Epsilon is absolute in
-those units. Touching/coplanar overlaps count conservatively. Self-check excludes
-faces sharing any vertex, including adjacent folded faces. Degenerate triangles
-are excluded and counted. Reports retain up to 100 pairs and the total detected
+those units. Reports classify crossings, coplanar overlap and contact. Ordinary
+mesh-adjacent or explicitly declared sewn contact is suppressed, while crossings
+and coplanar area overlaps remain visible. Degenerate triangles are excluded and
+counted. Reports retain up to 100 classified examples and the total detected
 count. Closed-volume containment without crossings needs the separate clearance
 and inside-candidate analysis.
 

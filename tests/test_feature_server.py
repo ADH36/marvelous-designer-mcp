@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from test_operations import FakeMD, PNG
+from md_transport import install_transport
 
 try:
     from marvelous_designer_mcp import server
@@ -29,15 +30,7 @@ class FeatureServerTests(unittest.TestCase):
         patcher = patch.dict('sys.modules', self.md.modules)
         patcher.start()
         self.addCleanup(patcher.stop)
-        bridge_patch = patch.object(server.bridge, 'call', side_effect=self.execute)
-        self.bridge_mock = bridge_patch.start()
-        self.addCleanup(bridge_patch.stop)
-
-    def execute(self, method, params, *, timeout=None):
-        self.assertEqual(method, 'execute_python')
-        namespace = {}
-        exec(params['code'], namespace)
-        return {'result': namespace['result'], 'stdout': '', 'stderr': '', 'error': None}
+        install_transport(self,server)
 
     def test_all_feature_tools_register_with_typed_schemas(self):
         tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
