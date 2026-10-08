@@ -15,7 +15,7 @@ from PIL import Image, ImageOps
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, ImageContent, TextContent
 
-from . import bridge, operations, recipes, advanced, geometry
+from . import bridge, operations, recipes, advanced, geometry, native_controls, mesh_analysis, drafting
 from .config import MD_HOST, MD_PORT
 
 mcp = FastMCP("marvelous-designer")
@@ -23,8 +23,24 @@ _OPERATION_SOURCE = Path(operations.__file__).read_text(encoding="utf-8")
 _RECIPE_SOURCE = Path(recipes.__file__).read_text(encoding="utf-8")
 _ADVANCED_SOURCE = Path(advanced.__file__).read_text(encoding="utf-8")
 _GEOMETRY_SOURCE = Path(geometry.__file__).read_text(encoding="utf-8")
+_NATIVE_SOURCE = Path(native_controls.__file__).read_text(encoding="utf-8")
 _history = deque(maxlen=100)
 _history_lock = Lock()
+_journal_lock = Lock()
+_server_instance_id = uuid.uuid4().hex
+_journal_directory = Path(os.environ.get('MD_MCP_HISTORY_DIR',str(
+    Path(os.environ.get('LOCALAPPDATA',tempfile.gettempdir()))/'marvelous-designer-mcp'/'journals')))
+_journal_path = _journal_directory/(_server_instance_id+'.jsonl')
+
+
+def _persist_operation(entry):
+    record={'server_instance_id':_server_instance_id,**entry}
+    with _journal_lock:
+        _journal_directory.mkdir(parents=True,exist_ok=True)
+        with _journal_path.open('a',encoding='utf-8') as file:
+            file.write(json.dumps(record,allow_nan=False)+'\n')
+            file.flush()
+            os.fsync(file.fileno())
 
 
 def _md_exec(code: str, *, timeout: float | None = None) -> dict:
@@ -52,7 +68,7 @@ def _execute_md_operation(operation: str, *, timeout: float | None = None, **par
         encoded = json.dumps(params, allow_nan=False, ensure_ascii=True)
     except (ValueError, TypeError) as exc:
         return {"ok": False, "error": str(exc)}
-    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + '\n' + _ADVANCED_SOURCE + '\n' + _GEOMETRY_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
+    code = _OPERATION_SOURCE + '\n' + _RECIPE_SOURCE + '\n' + _ADVANCED_SOURCE + '\n' + _GEOMETRY_SOURCE + '\n' + _NATIVE_SOURCE + f"\nresult = run_operation({operation!r}, json.loads({encoded!r}))\n"
     response = _md_exec(code, timeout=timeout)
     if response.get("ok") and isinstance(response.get("result"), dict):
         outcome = response["result"]
@@ -74,12 +90,23 @@ def _md_operation(operation: str, *, timeout: float | None = None, **params) -> 
         pass
     with _history_lock:
         _history.append(entry)
+    try:
+        _persist_operation(dict(entry))
+    except OSError as exc:
+        with _history_lock:
+            entry.update(status='failed',error='Cannot persist start record')
+        return {'ok':False,'error':'Operation journal is unavailable: '+str(exc),
+                'operation_id':entry['operation_id'],'partial_change_possible':False}
     started = time.monotonic()
     try:
         outcome = _execute_md_operation(operation, timeout=timeout, **params)
     except Exception:
         with _history_lock:
             entry.update(status='uncertain', elapsed_seconds=round(time.monotonic()-started, 3))
+        try:
+            _persist_operation(dict(entry))
+        except OSError:
+            pass
         raise
     with _history_lock:
         entry.update(status='completed' if outcome.get('ok') else
@@ -87,6 +114,12 @@ def _md_operation(operation: str, *, timeout: float | None = None, **params) -> 
                      elapsed_seconds=round(time.monotonic()-started, 3),
                      partial_change_possible=outcome.get('partial_change_possible', False))
     outcome['operation_id'] = entry['operation_id']
+    outcome['journal_path'] = str(_journal_path)
+    try:
+        _persist_operation(dict(entry))
+    except OSError as exc:
+        outcome['journal_error']=str(exc)
+        outcome['journal_completion_persisted']=False
     return outcome
 
 
@@ -511,10 +544,10 @@ def _local_call(callback) -> dict:
         return {'ok': False, 'error': str(exc)}
 
 
-def _read_json(path: str) -> dict:
+def _read_json(path: str, max_bytes: int = 1024 * 1024) -> dict:
     path = operations._path(path, '.json', must_exist=True)
-    if Path(path).stat().st_size > 1024 * 1024:
-        raise ValueError('JSON document exceeds 1 MiB')
+    if Path(path).stat().st_size > max_bytes:
+        raise ValueError('JSON document exceeds the permitted size')
     def unique(pairs):
         obj = {}
         for key, value in pairs:
@@ -527,11 +560,11 @@ def _read_json(path: str) -> dict:
     return json.loads(Path(path).read_text(encoding='utf-8'), object_pairs_hook=unique, parse_constant=invalid)
 
 
-def _write_json(path: str, value: dict, overwrite: bool = False) -> dict:
+def _write_json(path: str, value: dict, overwrite: bool = False, max_bytes: int = 1024 * 1024) -> dict:
     path = operations._path(path, '.json')
     encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2)
-    if len(encoded.encode('utf-8')) > 1024 * 1024:
-        raise ValueError('JSON document exceeds 1 MiB')
+    if len(encoded.encode('utf-8')) > max_bytes:
+        raise ValueError('JSON document exceeds the permitted size')
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if overwrite:
         temporary = None
@@ -837,14 +870,17 @@ def export_pattern_json(path: str, overwrite: bool = False) -> dict:
 
 
 @mcp.tool()
-def import_pattern_json(path: str, checkpoint_path: str, preserve_settings: bool = True) -> dict:
+def import_pattern_json(path: str, checkpoint_path: str, preserve_settings: bool = True,
+                        preserve_fabric_presets: bool = True) -> dict:
     """Checkpoint/import native JSON and restore known resolution, layer, solidify and fabric assignments.
 
     Preservation requires exactly the current unique pattern names and uniquely
     named fabrics. False explicitly allows replacement without settings recovery.
-    Physical fabric parameters, colorways and simulation caches are not certified.
+    Native .zfab backups are restored by default; opt out with preserve_fabric_presets=False.
+    Physical equivalence, colorways and simulation caches remain uncertified.
     """
-    return _md_operation('import_pattern_json', path=path, checkpoint_path=checkpoint_path,preserve_settings=preserve_settings)
+    return _md_operation('import_pattern_json', path=path, checkpoint_path=checkpoint_path,
+                         preserve_settings=preserve_settings,preserve_fabric_presets=preserve_fabric_presets)
 
 
 @mcp.tool()
@@ -896,17 +932,19 @@ def compare_mesh_snapshots(before_path: str, after_path: str, movement_threshold
 def arrange_patterns_verified(pattern_indices: list[int], arrangement_index: int, output_dir: str,
                               shape_style: Literal['Flat','Curved'] = 'Flat',
                               orientation: int | None = None, position: list[int] | None = None,
-                              movement_threshold: float = 0.1, require_movement: bool = True) -> dict:
+                              movement_threshold: float = 0.1, require_movement: bool = True,
+                              commit_redrape: bool = False) -> dict:
     """Checkpoint/apply arrangement and compare actual exported garment meshes before and after.
 
     Unchanged or noncomparable meshes fail when require_movement=True. False allows
-    an intentional no-op with explicit movement evidence. No automatic redrape or
-    guessed 3D setter is attempted. Movement does not certify correct avatar fit.
+    an intentional no-op with explicit movement evidence. commit_redrape=True
+    explicitly requests whole-garment redrape after setters; this can reset drape.
+    No guessed per-piece 3D setter is attempted. Movement does not certify fit.
     """
     return _md_operation('arrange_patterns_verified',pattern_indices=pattern_indices,
                          arrangement_index=arrangement_index,output_dir=output_dir,shape_style=shape_style,
                          orientation=orientation,position=position,movement_threshold=movement_threshold,
-                         require_movement=require_movement)
+                         require_movement=require_movement,commit_redrape=commit_redrape)
 
 
 @mcp.tool()
@@ -923,6 +961,173 @@ def arrange_patterns_by_name(pattern_indices: list[int], arrangement_name: str, 
 def inspect_native_pattern_geometry(pattern_index: int, export_path: str) -> dict:
     """Export native geometry/control points/IDs alongside the actual API boundary edge map."""
     return _md_operation('inspect_native_pattern_geometry',pattern_index=pattern_index,export_path=export_path)
+
+
+@mcp.tool()
+def inspect_capabilities() -> dict:
+    """Inspect installed native function availability/docstrings without invoking those functions."""
+    return _md_operation('inspect_capabilities')
+
+
+@mcp.tool()
+def redrape_garment(output_dir: str, translation: list[float] | None = None,
+                    movement_threshold: float = 0.1, require_movement: bool = True) -> dict:
+    """Checkpoint and explicitly redrape the whole garment with before/after mesh evidence.
+
+    Uses the installed ReDrape3DArrangement option signature captured in the live
+    session. This may reset drape; it is not a per-pattern rigid transform. Bounds
+    translation to 1000 native units per axis and never retries unchanged output.
+    """
+    return _md_operation('redrape_garment',output_dir=output_dir,translation=translation,
+                         movement_threshold=movement_threshold,require_movement=require_movement)
+
+
+@mcp.tool()
+def backup_fabric_presets(output_dir: str, fabric_indices: list[int]) -> dict:
+    """Export native fabric presets with unique names and SHA-256 recovery manifests."""
+    return _md_operation('backup_fabric_presets',output_dir=output_dir,fabric_indices=fabric_indices)
+
+
+@mcp.tool()
+def restore_fabric_presets(manifest_path: str, checkpoint_path: str) -> dict:
+    """Verify preset backup hashes, checkpoint and restore uniquely named existing fabrics."""
+    return _local_call(lambda: _md_operation('restore_fabric_presets',
+                                            manifest=_read_json(manifest_path),checkpoint_path=checkpoint_path))
+
+
+@mcp.tool()
+def inspect_zipper_style(style_index: int) -> dict:
+    """Read an existing zipper style's documented settings; does not create or attach a zipper."""
+    return _md_operation('inspect_zipper_style',style_index=style_index)
+
+
+@mcp.tool()
+def set_zipper_style(style_index: int, properties: dict, checkpoint_path: str) -> dict:
+    """Checkpoint/edit existing zipper style settings with installed signatures and read-back.
+
+    Properties: function_type 0–2, asset_type 0–6, teeth_type 0–1, positive teeth_width
+    and tape_thickness in mm, positive weight in grams. Does not place accessories.
+    """
+    return _md_operation('set_zipper_style',style_index=style_index,properties=properties,checkpoint_path=checkpoint_path)
+
+
+@mcp.tool()
+def plan_sleeve_cap(armhole_edges: list[dict], cap_edges: list[dict],
+                    ease_percent: float = 0.0, tolerance_percent: float = 3.0) -> dict:
+    """Measure actual armhole/cap edges and calculate explicit sleeve ease and length correction.
+
+    Endpoints are {pattern_index,line_index}; no mutation or automatic cap reshaping.
+    """
+    return _md_operation('plan_sleeve_cap',armhole_edges=armhole_edges,cap_edges=cap_edges,
+                         ease_percent=ease_percent,tolerance_percent=tolerance_percent)
+
+
+def _save_analysis(result,report_path):
+    if report_path:
+        result['report_file']=_write_json(report_path,result)
+    return result
+
+
+@mcp.tool()
+def analyze_mesh_fit(garment_path: str, avatar_path: str, clearance: float = 2.0,
+                      max_samples: int = 2000, report_path: str = '') -> dict:
+    """Analyze sampled garment-to-avatar surface clearance and closed-mesh inside candidates locally.
+
+    Requires triangulated OBJ meshes in identical coordinates/units. Open or
+    ambiguous avatars yield unsigned distances. Sampling can miss triangle
+    intersections; these are geometric diagnostics, not MD collision sensors.
+    """
+    return _local_call(lambda: _save_analysis(mesh_analysis.analyze_clearance(
+        garment_path,avatar_path,clearance,max_samples),report_path))
+
+
+@mcp.tool()
+def analyze_mesh_deformation(rest_path: str, current_path: str,
+                              stretch_limit_percent: float = 10.0, report_path: str = '') -> dict:
+    """Measure geometric edge elongation against an explicit matching reference OBJ locally.
+
+    Requires matching exported vertex order and triangle connectivity. Does not
+    infer MD stress, pressure or material strain, and never certifies garment fit.
+    """
+    return _local_call(lambda: _save_analysis(mesh_analysis.analyze_deformation(
+        rest_path,current_path,stretch_limit_percent),report_path))
+
+
+@mcp.tool()
+def draft_dart(points: list[list[float]], edge_index: int, intake: float, depth: float,
+                position_ratio: float = 0.5) -> dict:
+    """Draft a straight-polygon cut-out dart with equal legs and proposed seam indices locally.
+
+    Does not mutate MD. Create a new pattern, inspect actual boundary edges, then
+    sew verified legs. This is a cut-out dart, not an undocumented native dart command.
+    """
+    return _local_call(lambda: drafting.draft_dart(points,edge_index,intake,depth,position_ratio))
+
+
+@mcp.tool()
+def draft_seam_allowance(points: list[list[float]], width: float, miter_limit: float = 5.0) -> dict:
+    """Generate a local straight-polygon cutting outline with explicit allowance and miter bounds."""
+    return _local_call(lambda: drafting.seam_allowance(points,width,miter_limit))
+
+
+@mcp.tool()
+def draft_closure_layout(start: list[float], end: list[float], placket_width: float,
+                          spacing: float = 60.0, end_margin: float = 15.0,
+                          kind: Literal['buttons','zipper'] = 'buttons') -> dict:
+    """Draft local placket geometry and button/zipper centerlines; no native accessory placement."""
+    return _local_call(lambda: drafting.closure_layout(start,end,placket_width,spacing,end_margin,kind))
+
+
+@mcp.tool()
+def transform_native_pattern_json(path: str, output_path: str, pattern_ids: list[str],
+                                   scale_x: float = 1.0, scale_y: float = 1.0,
+                                   rotation_degrees: float = 0.0, translation_x: float = 0.0,
+                                   translation_y: float = 0.0, pivot: list[float] | None = None) -> dict:
+    """Edit exported native XY positions with explicit scaling, rotation and translation locally.
+
+    Select IDs from this file. Refuses graded documents and preserves original
+    files. Reimport separately with a checkpoint, reinspect sewing and rebind.
+    This changes 2D draft geometry, not 3D avatar placement or native grading rules.
+    """
+    def transform():
+        if Path(operations._path(path,'.json',must_exist=True)).resolve()==Path(operations._path(output_path,'.json')).resolve():
+            raise ValueError('Choose a new output path; the source export must be preserved')
+        result=drafting.transform_native_document(_read_json(path,max_bytes=10*1024*1024),pattern_ids,scale_x,scale_y,
+            rotation_degrees,translation_x,translation_y,pivot)
+        document=result.pop('document')
+        result['output_file']=_write_json(output_path,document,max_bytes=10*1024*1024)
+        return result
+    return _local_call(transform)
+
+
+@mcp.tool()
+def compare_native_pattern_exports(before_path: str, after_path: str) -> dict:
+    """Compare native pattern IDs/names/geometry in two exports without claiming global ID stability."""
+    def compare():
+        def index(path):
+            document=_read_json(path,max_bytes=10*1024*1024)
+            if not isinstance(document,dict) or not isinstance(document.get('PatternList'),list):
+                raise ValueError('Supply native PatternList exports')
+            records={}
+            for piece in document['PatternList']:
+                if not isinstance(piece,dict) or not isinstance(piece.get('ID'),str) or not piece['ID']:
+                    raise ValueError('Native piece has no usable ID')
+                if piece['ID'] in records:
+                    raise ValueError('Duplicate native pattern ID')
+                records[piece['ID']]=piece
+            return records
+        first,second=index(before_path),index(after_path)
+        common=sorted(first.keys() & second.keys())
+        records=[]
+        for identity in common:
+            a,b=first[identity],second[identity]
+            records.append({'id':identity,'before_name':a.get('Name'),'after_name':b.get('Name'),
+                            'native_geometry_equal':a.get('ShapeInfo')==b.get('ShapeInfo'),
+                            'internal_geometry_equal':a.get('InternalLineList')==b.get('InternalLineList')})
+        return {'ok':True,'same_ids':records,'removed_ids':sorted(first.keys()-second.keys()),
+                'added_ids':sorted(second.keys()-first.keys()),'all_pattern_ids_retained':first.keys()==second.keys(),
+                'native_id_persistence_certified':False,'scope':'observed identity in these two files only; aliases still require geometry checks'}
+    return _local_call(compare)
 
 
 @mcp.tool()
@@ -1109,6 +1314,34 @@ def _fit_measurements(pattern_indices, targets, seam_pairs):
     return {'ok': measured.get('ok', False) and sewing.get('ok', False), 'measurements': measured, 'sewing': sewing}
 
 
+def _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path):
+    if type(capture_mesh) is not bool:
+        raise ValueError('capture_mesh must be boolean')
+    if (avatar_mesh_path or rest_mesh_path) and not capture_mesh:
+        raise ValueError('Avatar/rest diagnostics require capture_mesh=True')
+    for path in (avatar_mesh_path,rest_mesh_path):
+        if path:
+            mesh_analysis.read_triangles(path)
+
+
+def _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path):
+    snapshot=outcome.get('mesh_after',outcome.get('mesh',{}))
+    path=snapshot.get('metrics',{}).get('path')
+    if not path:
+        return
+    diagnostics={}
+    for name,source,callback in (
+        ('clearance',avatar_mesh_path,lambda:mesh_analysis.analyze_clearance(path,avatar_mesh_path)),
+        ('edge_elongation',rest_mesh_path,lambda:mesh_analysis.analyze_deformation(rest_mesh_path,path))):
+        if source:
+            try:
+                diagnostics[name]=callback()
+            except (OSError,ValueError,TypeError) as exc:
+                diagnostics[name]={'ok':False,'error':str(exc),'fit_certified':False}
+    outcome['geometric_diagnostics']=diagnostics
+    outcome['native_fit_sensors']=False
+
+
 def _fit_result(outcome, folder, observations, preview_count):
     outcome.update(observations=observations, observations_source='caller supplied; not sensor measurements',
                    fit_certified=False, scope='images, mesh bounds and 2D edge measurements; inspect 3D fit, wrinkles and collisions visually')
@@ -1133,21 +1366,23 @@ def _fit_error(outcome):
 @mcp.tool()
 def capture_fit_report(output_dir: str, pattern_indices: list[int], targets: list[dict] | None = None,
                        seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
-                       preview_count: int = 4, capture_mesh: bool = True) -> CallToolResult:
+                       preview_count: int = 4, capture_mesh: bool = True,
+                       avatar_mesh_path: str = '', rest_mesh_path: str = '') -> CallToolResult:
     """Return garment images, edge target comparisons, seam diagnostics and a saved fit report.
 
     Does not simulate. Observations are caller supplied; no automated body collision,
     pressure, strain, wrinkle or fit certification is inferred from measurements.
+    Optional explicit avatar/rest OBJ files enable labeled geometric diagnostics.
     """
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
-        if type(capture_mesh) is not bool:
-            raise ValueError('capture_mesh must be boolean')
+        _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path)
         outcome = _fit_measurements(pattern_indices, targets, seam_pairs)
         if capture_mesh and outcome.get('ok'):
             mesh = capture_mesh_snapshot(str(folder/'mesh'/'garment.obj'))
             outcome['mesh'] = mesh
             outcome['ok'] = mesh.get('ok',False)
+            _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path)
         return _fit_result(outcome, folder, observations, preview_count)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         return _fit_error({'ok': False, 'error': str(exc)})
@@ -1167,7 +1402,8 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                      quality: int = 2, simulation_mode: int = 0, targets: list[dict] | None = None,
                      seam_pairs: list[dict] | None = None, observations: list[str] | None = None,
                      preview_count: int = 4, timeout: float = 300.0,
-                     capture_mesh: bool = True) -> CallToolResult:
+                     capture_mesh: bool = True, avatar_mesh_path: str = '',
+                     rest_mesh_path: str = '') -> CallToolResult:
     """Checkpoint, set verified quality/mode, run one bounded simulation pass and return images/report.
 
     steps is the native Simulate(int) argument, limited to 1–200. Quality 0 normal,
@@ -1177,11 +1413,10 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
     outcome = {'ok': False}
     try:
         folder, observations = _fit_inputs(output_dir, observations, preview_count)
+        _fit_geometry_inputs(capture_mesh,avatar_mesh_path,rest_mesh_path)
         preflight = _fit_measurements(pattern_indices, targets, seam_pairs)
         if not preflight['ok']:
             return _fit_error(preflight)
-        if type(capture_mesh) is not bool:
-            raise ValueError('capture_mesh must be boolean')
         before_mesh = capture_mesh_snapshot(str(folder/'mesh-before'/'garment.obj')) if capture_mesh else None
         if before_mesh is not None and not before_mesh.get('ok'):
             return _fit_error(before_mesh)
@@ -1199,6 +1434,7 @@ def run_fitting_pass(output_dir: str, pattern_indices: list[int], simulation_ste
                 outcome['ok'] = outcome.get('ok',False) and after_mesh.get('ok',False)
                 if after_mesh.get('ok'):
                     outcome['mesh_comparison']=geometry.compare_meshes(before_mesh['metrics']['path'],after_mesh['metrics']['path'])
+                    _fit_geometry_diagnostics(outcome,avatar_mesh_path,rest_mesh_path)
         return _fit_result(outcome, folder, observations, preview_count)
     except (OSError, ValueError, TypeError, KeyError) as exc:
         outcome.update(ok=False, error=str(exc))
@@ -1273,7 +1509,8 @@ def get_operation_history(limit: int = 25) -> dict:
         operations._integer(limit, 'limit', minimum=1, maximum=100)
         with _history_lock:
             entries = [dict(entry) for entry in list(_history)[-limit:]]
-        return {'ok': True, 'operations': entries, 'scope': 'this process only; excludes legacy raw Python tools'}
+        return {'ok': True, 'operations': entries,'journal_path':str(_journal_path),
+                'scope': 'recent process entries; durable events saved separately; excludes legacy raw Python tools'}
     return _local_call(history)
 
 
@@ -1281,3 +1518,35 @@ def get_operation_history(limit: int = 25) -> dict:
 def save_operation_history(path: str, overwrite: bool = False) -> dict:
     """Persist the current process's operation journal to JSON; contains digests, not replayable code."""
     return _local_call(lambda: _write_json(path, get_operation_history(100), overwrite))
+
+
+@mcp.tool()
+def read_operation_journal(path: str, limit: int = 100) -> dict:
+    """Read durable operation events locally; incomplete starts remain uncertain and are never replayed."""
+    def read():
+        source=Path(operations._path(path,must_exist=True))
+        operations._integer(limit,'limit',minimum=1,maximum=1000)
+        if source.stat().st_size>10*1024*1024:
+            raise ValueError('Journal exceeds 10 MiB; archive older events')
+        entries={}
+        with source.open(encoding='utf-8') as file:
+            for line in file:
+                if len(line)>16384:
+                    raise ValueError('Journal event exceeds 16 KiB')
+                try:
+                    event=json.loads(line)
+                except json.JSONDecodeError:
+                    # A torn final append is diagnostic evidence, not a replay instruction.
+                    return {'ok':False,'error':'Journal contains an incomplete/invalid event',
+                            'complete_operations':list(entries.values())[-limit:],'requires_state_inspection':True}
+                if not isinstance(event,dict) or not isinstance(event.get('operation_id'),str):
+                    raise ValueError('Invalid operation event')
+                entries[event['operation_id']]=event
+        result=list(entries.values())[-limit:]
+        for entry in result:
+            if entry.get('status')=='started':
+                entry.update(status='uncertain',reason='No persisted completion record; inspect MD/checkpoints before further mutation')
+        return {'ok':True,'journal_path':str(source),'operations':result,
+                'requires_state_inspection':any(e.get('status')=='uncertain' for e in result),
+                'automatic_replay':False}
+    return _local_call(read)

@@ -154,7 +154,7 @@ def export_pattern_json(path,overwrite=False):
     return result
 
 
-def import_pattern_json(path,checkpoint_path,preserve_settings=True):
+def import_pattern_json(path,checkpoint_path,preserve_settings=True,preserve_fabric_presets=True):
     path=_path(path,'.json',must_exist=True)
     if os.path.getsize(path)>10*1024*1024:
         raise ValueError('Native pattern JSON exceeds 10 MiB')
@@ -177,28 +177,46 @@ def import_pattern_json(path,checkpoint_path,preserve_settings=True):
     _function('pattern_api','GetPatternCount')
     if type(preserve_settings) is not bool:
         raise ValueError('preserve_settings must be boolean')
+    if type(preserve_fabric_presets) is not bool:
+        raise ValueError('preserve_fabric_presets must be boolean')
     settings = _capture_import_settings(document) if preserve_settings else []
     settings_path=_path(checkpoint_path,'.zprj')+'.settings.json'
     if preserve_settings and os.path.exists(settings_path):
         raise ValueError('Settings recovery file already exists; choose a fresh checkpoint path')
     checkpoint=save_checkpoint(checkpoint_path)
+    fabric_backup=None
+    scene_mutated=False
     try:
+        if preserve_settings and preserve_fabric_presets and settings:
+            if globals().get('__package__') == 'marvelous_designer_mcp':
+                from . import native_controls as controls
+                backup_fn,restore_fn=controls.backup_fabric_presets,controls._restore_fabric_presets
+            else:
+                backup_fn,restore_fn=backup_fabric_presets,_restore_fabric_presets
+            fabric_backup=backup_fn(_path(checkpoint_path,'.zprj')+'.fabrics',
+                                    sorted({state['original_fabric_index'] for state in settings}))
         if preserve_settings:
             with open(settings_path,'x',encoding='utf-8') as file:
-                json.dump({'settings':settings,'scope':'known properties only'},file,indent=2)
+                json.dump({'settings':settings,'fabric_backup':fabric_backup,'scope':'known properties and optional native fabric presets'},file,indent=2)
+        scene_mutated=True
         success=bool(fn(path))
         if not success:
             raise RuntimeError('MD rejected native JSON import; scene may have changed')
+        fabrics_restored=restore_fn(fabric_backup['manifest']) if fabric_backup else None
+        if fabrics_restored and not fabrics_restored.get('ok'):
+            raise RuntimeError('Native fabric recovery failed; use the project checkpoint')
         restored = _restore_import_settings(settings) if preserve_settings else []
         return {'ok':success,'checkpoint':checkpoint,'pattern_count':_function('pattern_api','GetPatternCount')(),
                 'partial_change_possible':not success,
                 'refresh_indices':True,'restored_settings':restored,'preserve_settings':preserve_settings,
                 'settings_recovery_path':settings_path if preserve_settings else None,
+                'fabric_backup':fabric_backup,'fabric_recovery':fabrics_restored,
                 'full_state_preserved':False,
-                'unverified_state':['physical fabric parameters','colorways','freeze','strengthen','simulation cache'],
+                'unverified_state':['physical equivalence after preset restore','colorways','freeze','strengthen','simulation cache'],
                 'verification':'known settings reapplied/read back by unique names; inspect geometry and rebind references'}
     except Exception as exc:
-        return {'ok':False,'error':str(exc),'checkpoint':checkpoint,'partial_change_possible':True,
+        return {'ok':False,'error':str(exc),'checkpoint':checkpoint,'partial_change_possible':scene_mutated,
+                'fabric_backup':fabric_backup,
                 'settings_recovery_path':settings_path if preserve_settings else None}
 
 
@@ -226,6 +244,7 @@ def _capture_import_settings(document):
         states.append({'name':n,'particle_distance':_function('pattern_api','GetParticleDistanceOfPattern')(i),
                        'mesh_type':mesh_type,'layer':_function('pattern_api','GetPatternLayer')(i),
                        'solidify':bool(_function('pattern_api','IsPatternPieceSolidify')(i)),
+                       'original_fabric_index':_function('pattern_api','GetPatternPieceFabricIndex')(i),
                        'fabric_name':fabric_name(_function('pattern_api','GetPatternPieceFabricIndex')(i))})
     for fn in ('SetParticleDistanceOfPattern','SetMeshType','SetPatternLayer','SetPatternPieceSolidify'):
         _function('pattern_api',fn)

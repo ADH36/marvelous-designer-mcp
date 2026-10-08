@@ -86,15 +86,21 @@ def capture_mesh_snapshot(path):
 
 def arrange_patterns_verified(pattern_indices, arrangement_index, output_dir,
                               shape_style='Flat', orientation=None, position=None,
-                              movement_threshold=0.1, require_movement=True):
+                              movement_threshold=0.1, require_movement=True,commit_redrape=False):
     folder = _path(output_dir)
     if os.path.exists(folder) and (not os.path.isdir(folder) or os.listdir(folder)):
         raise ValueError('Placement evidence requires a new or empty output directory')
     recipe_number(movement_threshold, 'movement_threshold', True)
-    if type(require_movement) is not bool:
-        raise ValueError('require_movement must be boolean')
+    if type(require_movement) is not bool or type(commit_redrape) is not bool:
+        raise ValueError('require_movement and commit_redrape must be boolean')
     # Validate all setter inputs before checkpoint/export; reuse the same validation as the setter.
     _arrangement_inputs(pattern_indices, arrangement_index, shape_style, orientation, position)
+    if commit_redrape:
+        if globals().get('__package__') == 'marvelous_designer_mcp':
+            from . import native_controls as controls
+            redrape,refresh,option,_=controls._redrape_options()
+        else:
+            redrape,refresh,option,_=_redrape_options()
     checkpoint = create_scene_checkpoint(os.path.join(folder, 'before.zprj'))
     if not checkpoint.get('ok'):
         return checkpoint
@@ -107,11 +113,17 @@ def arrange_patterns_verified(pattern_indices, arrangement_index, output_dir,
         applied = arrange_patterns(pattern_indices, arrangement_index, shape_style, orientation, position)
         if not applied.get('ok'):
             return {'ok':False, 'checkpoint':checkpoint, 'arrangement':applied, 'partial_change_possible':True}
+        if commit_redrape:
+            returned=redrape(option)
+            if returned is False:
+                raise RuntimeError('Native redrape rejected the arrangement commit')
+            refresh()
         after = capture_mesh_snapshot(os.path.join(folder,'after','garment.obj'))
         comparison = compare_meshes(before['metrics']['path'],after['metrics']['path'],movement_threshold)
         verified = comparison['movement_detected'] is True
         result = {'ok':verified or not require_movement, 'checkpoint':checkpoint, 'arrangement':applied,
                   'mesh_comparison':comparison, 'movement_verified':verified, 'placement_certified':False,
+                  'commit_redrape_requested':commit_redrape,'redrape_scope':'whole garment; may reset simulated drape' if commit_redrape else None,
                   'partial_change_possible':True,
                   'scope':'whole garment mesh movement only; intended body region/collisions still require visual review'}
         if require_movement and not verified:

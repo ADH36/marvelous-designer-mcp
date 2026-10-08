@@ -9,6 +9,8 @@ The subsequent MD 2026.0.315 live session exercised all 25 new v0.5 tool names
 and built two basic garments; not every parameter branch or complex workflow
 was covered. The report led to [v0.6 implementation changes](live-test-improvements.md).
 Those changes are **untested**, at the user's request.
+Version 0.7 adds [geometric fit diagnostics, construction drafts and fuller recovery](remaining-gaps.md),
+also without tests or live calls.
 Check installed signatures with `md_api` and trial on a checkpointed disposable
 project before using them on production garments.
 
@@ -147,6 +149,10 @@ completed/failed/uncertain status. No scripts or replayable inputs are stored.
 Bridge failures remain uncertain and are never automatically retried. The
 journal excludes legacy raw Python wrappers and local-only recipe operations,
 is lost on process exit unless saved, and is separate for Codex and Hermes.
+Since v0.7 registered runtime operations also save durable per-process JSONL
+events automatically. `read_operation_journal` can inspect incomplete or uncertain
+operations after a restart; it never replays them. Legacy raw Python tools remain
+outside that journal. See [journal storage and limits](remaining-gaps.md).
 
 Use the cycle: checkpoint → create/inspect → name edges → arrange/layer →
 diagnose sewing → bounded simulation → inspect images/measurements → explicitly
